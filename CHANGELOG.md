@@ -12,5 +12,7 @@ All notable changes are documented here.
 - Configured LSP lifecycle, diagnostics, navigation, completion, and edits.
 - Permission-scoped structured agent API and integrated agent panel.
 - Zero-friction built-in Codex chat using the managed app-server protocol.
+- Scrollable, role-labeled Agent chat; native Unicode positional edits; and a
+  nested-container-safe workspace sandbox for routine Codex collaboration.
 - TOML configuration for editing, keybindings, explorer, LSP, and agent access.
 - Directory/file CLI workflow, CI, release packaging, and installer.

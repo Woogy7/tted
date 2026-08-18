@@ -39,4 +39,5 @@ resets the selected custom binding. Changes are saved for the workspace.
 In Agent chat, Enter sends, Shift+Enter adds a line, Esc stops active work (or
 returns to the document when idle), Ctrl+R retries, Ctrl+L starts a new
 conversation, Ctrl+K clears the visible chat, and Tab returns focus to the
-document without closing the panel. Ctrl+G focuses the open panel again.
+document without closing the panel. Ctrl+G focuses the open panel again. Mouse
+wheel or Page Up/Down scrolls chat history; Home/End jumps oldest/latest.

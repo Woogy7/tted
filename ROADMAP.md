@@ -1053,9 +1053,10 @@ macOS x86_64/ARM64 binaries.
 chat pane that detects and starts Codex, checks existing authentication, guides
 device-code sign-in, preserves a conversation thread, streams replies/activity
 and diffs, refreshes edited files, and provides Stop, Retry, New, Clear, Diff,
-Accept, and guarded Revert controls.
-Potentially risky commands and file operations pause in a centered, plain-language
-Allow/Decline dialog and are never approved silently.
+Accept, and guarded Revert controls. Conversation history scrolls independently
+and clearly labels human, agent, activity, and error rows. Routine workspace
+reads, edits, patches, and validation proceed without prompts; untrusted or
+destructive commands pause in a centered Allow/Decline dialog.
 
 ## Goal
 

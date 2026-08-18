@@ -91,6 +91,15 @@ struct SplitState {
 struct AgentMessage {
     text: String,
     path: Option<PathBuf>,
+    kind: AgentMessageKind,
+}
+
+#[derive(Clone, Copy)]
+enum AgentMessageKind {
+    Human,
+    Agent,
+    Activity,
+    Error,
 }
 
 struct AgentDiskChange {
@@ -180,6 +189,7 @@ pub struct Editor {
     agent_panel_focused: bool,
     agent_input: String,
     agent_messages: Vec<AgentMessage>,
+    agent_scroll: usize,
     agent_prompts: VecDeque<String>,
     agent_modified: HashMap<u64, (usize, u64)>,
     agent_area: Option<Rect>,
@@ -286,6 +296,7 @@ impl Editor {
             agent_panel_focused: false,
             agent_input: String::new(),
             agent_messages: Vec::new(),
+            agent_scroll: 0,
             agent_prompts: VecDeque::new(),
             agent_modified: HashMap::new(),
             agent_area: None,
@@ -447,6 +458,20 @@ impl Editor {
                     self.agent_panel_focused = false;
                 }
                 match mouse.kind {
+                    MouseEventKind::ScrollUp
+                        if self.agent_area.is_some_and(|area| {
+                            area.contains((mouse.column, mouse.row).into())
+                        }) =>
+                    {
+                        self.agent_scroll = self.agent_scroll.saturating_add(3);
+                    }
+                    MouseEventKind::ScrollDown
+                        if self.agent_area.is_some_and(|area| {
+                            area.contains((mouse.column, mouse.row).into())
+                        }) =>
+                    {
+                        self.agent_scroll = self.agent_scroll.saturating_sub(3);
+                    }
                     MouseEventKind::Down(MouseButton::Left)
                         if self.agent_area.is_some_and(|area| {
                             area.contains((mouse.column, mouse.row).into())
@@ -2280,7 +2305,11 @@ impl Editor {
         let params = request.params.clone();
         let is_write = matches!(
             method.as_str(),
-            "edit.apply" | "edit.apply_batch" | "editor.open" | "editor.focus_range"
+            "edit.apply"
+                | "edit.apply_batch"
+                | "editor.edit_text"
+                | "editor.open"
+                | "editor.focus_range"
         );
         let allowed = if method == "file.create" {
             self.config.agent.allow_file_create
@@ -2323,12 +2352,13 @@ impl Editor {
             "editor.open" => { let path=self.safe_agent_path(params)?; self.open_path(path); Ok(json!({"buffer_id":self.current().id()})) }
             "editor.focus_range" => { let id=required_u64(params,"buffer_id")?; let line=required_u64(params,"line")? as usize; let column=required_u64(params,"column")? as usize; let index=self.buffers.iter().position(|buffer|buffer.id()==id).ok_or("unknown buffer")?; self.active=index; self.update_active_split_buffer(); self.current_mut().set_cursor_line_col(line,column,false); self.ensure_visible(); Ok(json!({"focused":true})) }
             "edit.apply" => { let id=required_u64(params,"buffer_id")?; let revision=required_u64(params,"revision")?; let start=required_u64(params,"start")? as usize; let end=required_u64(params,"end")? as usize; let text=params.get("text").and_then(Value::as_str).ok_or("missing text")?; let buffer=self.buffers.iter_mut().find(|buffer|buffer.id()==id).ok_or("unknown buffer")?; let revision=buffer.apply_agent_edit(revision,start,end,text).map_err(str::to_owned)?; let tracked=self.agent_modified.entry(id).or_insert((0,revision)); tracked.0+=1; tracked.1=revision; self.changed(); Ok(json!({"revision":revision})) }
+            "editor.edit_text" => self.apply_agent_text_operation(params),
             "diagnostics.list" => Ok(json!(self.current_diagnostics().iter().map(|item|json!({"path":item.path,"line":item.line,"column":item.column,"severity":item.severity,"message":item.message})).collect::<Vec<_>>())),
             "git.status" => Ok(json!({"text":self.git.snapshot().status_text()})),
             "git.diff" => Ok(json!({"text":self.git.snapshot().workspace_diff()})),
             "agent.next_prompt" => Ok(json!({"prompt":self.agent_prompts.pop_front()})),
-            "agent.respond" => { let text=params.get("text").and_then(Value::as_str).ok_or("missing text")?.to_owned(); let append=params.get("append").and_then(Value::as_bool).unwrap_or(false); if append { if let Some(last)=self.agent_messages.last_mut() { last.text.push_str(&text); } else { self.agent_messages.push(AgentMessage{text,path:None}); } } else { self.agent_messages.push(AgentMessage{text,path:None}); } self.agent_panel_visible=true; Ok(json!({"received":true})) }
-            "agent.activity" => { let text=params.get("text").and_then(Value::as_str).ok_or("missing text")?.to_owned(); let path=params.get("path").and_then(Value::as_str).map(|path|self.explorer.root().join(path)); self.agent_messages.push(AgentMessage{text,path}); self.agent_panel_visible=true; Ok(json!({"received":true})) }
+            "agent.respond" => { let text=params.get("text").and_then(Value::as_str).ok_or("missing text")?.to_owned(); let append=params.get("append").and_then(Value::as_bool).unwrap_or(false); if append { if let Some(last)=self.agent_messages.last_mut() { last.text.push_str(&text); } else { self.agent_messages.push(AgentMessage{text,path:None,kind:AgentMessageKind::Agent}); } } else { self.agent_messages.push(AgentMessage{text,path:None,kind:AgentMessageKind::Agent}); } self.agent_panel_visible=true; Ok(json!({"received":true})) }
+            "agent.activity" => { let text=params.get("text").and_then(Value::as_str).ok_or("missing text")?.to_owned(); let path=params.get("path").and_then(Value::as_str).map(|path|self.explorer.root().join(path)); self.agent_messages.push(AgentMessage{text,path,kind:AgentMessageKind::Activity}); self.agent_panel_visible=true; Ok(json!({"received":true})) }
             "command.run" => { let id=params.get("id").and_then(Value::as_str).ok_or("missing command id")?; let command=Command::from_id(id).ok_or("unknown command")?; self.execute_command(command).map_err(|error|error.to_string())?; Ok(json!({"executed":id})) }
             "file.create" => { let path=self.safe_agent_new_path(params)?; fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|error|error.to_string())?; self.explorer.refresh(); Ok(json!({"path":path})) }
             "file.delete" => { let path=self.safe_agent_path(params)?; if self.path_is_open(&path) { return Err("close the file before deleting it".into()); } if path.is_dir() { fs::remove_dir(&path) } else { fs::remove_file(&path) }.map_err(|error|error.to_string())?; self.explorer.refresh(); Ok(json!({"deleted":path})) }
@@ -2343,6 +2373,82 @@ impl Editor {
             .iter()
             .find(|buffer| buffer.id() == id)
             .ok_or_else(|| "unknown buffer".into())
+    }
+
+    fn apply_agent_text_operation(&mut self, params: &Value) -> Result<Value, String> {
+        let path = self.safe_agent_path(params)?;
+        if !self.path_is_open(&path) {
+            self.open_path(path.clone());
+        }
+        let index = self
+            .buffers
+            .iter()
+            .position(|buffer| buffer.path().is_some_and(|open| same_path(open, &path)))
+            .ok_or("could not open path")?;
+        let expected_revision = required_u64(params, "revision")?;
+        if self.buffers[index].revision() != expected_revision {
+            return Err(format!(
+                "stale editor state: expected revision {expected_revision}, current revision {}",
+                self.buffers[index].revision()
+            ));
+        }
+        let operation = params
+            .get("operation")
+            .and_then(Value::as_str)
+            .ok_or("missing operation")?;
+        let text = params
+            .get("text")
+            .and_then(Value::as_str)
+            .ok_or("missing text")?
+            .replace("\r\n", "\n")
+            .replace('\r', "\n");
+        let (start, end, start_line, start_column) = match operation {
+            "insert" => {
+                let (offset, line, column) = agent_position(&self.buffers[index], params)?;
+                (offset, offset, line, column)
+            }
+            "replace_selection" => {
+                let selection = params.get("selection").ok_or("missing selection")?;
+                let start_value = selection.get("start").ok_or("missing selection.start")?;
+                let end_value = selection.get("end").ok_or("missing selection.end")?;
+                let (start, start_line, start_column) =
+                    agent_position(&self.buffers[index], start_value)?;
+                let (end, _, _) = agent_position(&self.buffers[index], end_value)?;
+                if start > end {
+                    return Err("selection start is after selection end".into());
+                }
+                (start, end, start_line, start_column)
+            }
+            "append" => {
+                let offset = self.buffers[index].len_chars();
+                let (line, column) = agent_offset_position(&self.buffers[index], offset);
+                (offset, offset, line, column)
+            }
+            _ => return Err("operation must be insert, replace_selection, or append".into()),
+        };
+        let inserted_chars = text.chars().count();
+        let revision = self.buffers[index]
+            .apply_agent_edit(expected_revision, start, end, &text)
+            .map_err(str::to_owned)?;
+        let (end_line, end_column) = inserted_end_position(start_line, start_column, &text);
+        let id = self.buffers[index].id();
+        let tracked = self.agent_modified.entry(id).or_insert((0, revision));
+        tracked.0 += 1;
+        tracked.1 = revision;
+        self.active = index;
+        self.update_active_split_buffer();
+        self.changed();
+        self.ensure_visible();
+        Ok(json!({
+            "buffer_id":id,
+            "revision":revision,
+            "range":{
+                "start":{"line":start_line,"column":start_column},
+                "end":{"line":end_line,"column":end_column},
+                "start_char":start,
+                "end_char":start + inserted_chars
+            }
+        }))
     }
     fn safe_agent_path(&self, params: &Value) -> Result<PathBuf, String> {
         let raw = params
@@ -2464,6 +2570,10 @@ impl Editor {
         match key.code {
             KeyCode::Tab => self.agent_panel_focused = false,
             KeyCode::Char('g') | KeyCode::Char('G') if ctrl => self.agent_panel_focused = false,
+            KeyCode::PageUp => self.agent_scroll = self.agent_scroll.saturating_add(8),
+            KeyCode::PageDown => self.agent_scroll = self.agent_scroll.saturating_sub(8),
+            KeyCode::Home => self.agent_scroll = usize::MAX,
+            KeyCode::End => self.agent_scroll = 0,
             KeyCode::Esc if matches!(self.agent_backend_status, BuiltinAgentStatus::Working) => {
                 self.stop_agent()
             }
@@ -2508,6 +2618,7 @@ impl Editor {
             self.agent_messages.push(AgentMessage {
                 text: "! Give the untitled file a name, then send again".into(),
                 path: None,
+                kind: AgentMessageKind::Error,
             });
             self.agent_panel_focused = false;
             self.path_prompt = Some(String::new());
@@ -2522,6 +2633,7 @@ impl Editor {
                 self.agent_messages.push(AgentMessage {
                     text: format!("! Could not synchronize {name}: {error}"),
                     path: None,
+                    kind: AgentMessageKind::Error,
                 });
                 self.message = format!("Could not save {name} for Codex");
                 return;
@@ -2541,9 +2653,11 @@ impl Editor {
         }
         self.ensure_agent_backend();
         self.agent_messages.push(AgentMessage {
-            text: format!("> {prompt}"),
+            text: prompt.clone(),
             path: None,
+            kind: AgentMessageKind::Human,
         });
+        self.agent_scroll = 0;
         self.agent_last_prompt = Some(prompt.clone());
         self.agent_disk_before = self.capture_workspace_files();
         self.agent_disk_changes.clear();
@@ -2578,10 +2692,16 @@ impl Editor {
             .unwrap_or_else(|| self.current().name());
         let (line, column) = self.current().cursor_line_col();
         let selection = self.current().selected_text().unwrap_or_default();
+        let selection_range = self.current().selection().map_or_else(
+            || "none".into(),
+            |(start, end)| {
+                let start = agent_offset_position(self.current(), start);
+                let end = agent_offset_position(self.current(), end);
+                format!("{}:{}-{}:{}", start.0, start.1, end.0, end.1)
+            },
+        );
         format!(
-            "{prompt}\n\nTTED context:\nCurrent file: {path}\nCursor: {}:{}\nSelection:\n{selection}",
-            line + 1,
-            column + 1
+            "{prompt}\n\nTTED context (zero-based Unicode line:column):\nCurrent file: {path}\nCursor: {line}:{column}\nSelection range: {selection_range}\nSelection text:\n{selection}"
         )
     }
 
@@ -2607,14 +2727,16 @@ impl Editor {
                     self.agent_messages.push(AgentMessage {
                         text: format!("Sign in at {url} with code {code}"),
                         path: None,
+                        kind: AgentMessageKind::Activity,
                     });
                 }
                 BackendEvent::TurnStarted => {
                     self.agent_backend_status = BuiltinAgentStatus::Working;
                     self.agent_turn_diff.clear();
                     self.agent_messages.push(AgentMessage {
-                        text: "Codex: ".into(),
+                        text: String::new(),
                         path: None,
+                        kind: AgentMessageKind::Agent,
                     });
                     self.agent_stream_message = Some(self.agent_messages.len() - 1);
                 }
@@ -2626,8 +2748,9 @@ impl Editor {
                     }
                 }
                 BackendEvent::Activity(text) => self.agent_messages.push(AgentMessage {
-                    text: format!("● {text}"),
+                    text,
                     path: None,
+                    kind: AgentMessageKind::Activity,
                 }),
                 BackendEvent::Approval { id, detail } => {
                     self.agent_approval = Some(AgentApproval { id, detail });
@@ -2642,6 +2765,7 @@ impl Editor {
                     self.agent_messages.push(AgentMessage {
                         text: format!("✓ Codex {status}"),
                         path: None,
+                        kind: AgentMessageKind::Activity,
                     });
                     self.explorer.refresh();
                     self.git.request_refresh();
@@ -2653,8 +2777,9 @@ impl Editor {
                     self.agent_stream_message = None;
                     self.agent_backend_status = BuiltinAgentStatus::Error(error.clone());
                     self.agent_messages.push(AgentMessage {
-                        text: format!("! {error}"),
+                        text: error,
                         path: None,
+                        kind: AgentMessageKind::Error,
                     });
                 }
             }
@@ -2692,6 +2817,7 @@ impl Editor {
             backend.send(BackendCommand::NewConversation);
         }
         self.agent_messages.clear();
+        self.agent_scroll = 0;
         self.agent_turn_diff.clear();
         self.agent_stream_message = None;
         self.message = "Started a new Codex conversation".into();
@@ -2707,6 +2833,7 @@ impl Editor {
 
     fn clear_agent_chat(&mut self) {
         self.agent_messages.clear();
+        self.agent_scroll = 0;
         self.message = "Cleared Agent chat".into();
     }
 
@@ -3383,32 +3510,56 @@ impl Editor {
         ])
         .split(area);
         let visible = usize::from(sections[0].height.saturating_sub(2));
-        let start = self.agent_messages.len().saturating_sub(visible);
-        let mut lines = Vec::new();
-        for (offset, message) in self
-            .agent_messages
+        let content_width = usize::from(sections[0].width.saturating_sub(10).max(1));
+        let mut transcript = Vec::<(Line<'static>, Option<PathBuf>)>::new();
+        for message in &self.agent_messages {
+            let (label, color, background) = match message.kind {
+                AgentMessageKind::Human => ("YOU   ", theme::BLUE, theme::SURFACE0),
+                AgentMessageKind::Agent => ("CODEX ", theme::GREEN, theme::MANTLE),
+                AgentMessageKind::Activity => ("  ·   ", theme::OVERLAY0, theme::MANTLE),
+                AgentMessageKind::Error => ("  !   ", theme::RED, theme::MANTLE),
+            };
+            for (index, text) in wrap_agent_text(&message.text, content_width)
+                .into_iter()
+                .enumerate()
+            {
+                transcript.push((
+                    Line::from(vec![
+                        Span::styled(
+                            if index == 0 { label } else { "      " },
+                            Style::default().fg(color).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(text, Style::default().fg(theme::TEXT)),
+                    ])
+                    .style(Style::default().bg(background)),
+                    message.path.clone(),
+                ));
+            }
+        }
+        let max_scroll = transcript.len().saturating_sub(visible);
+        self.agent_scroll = self.agent_scroll.min(max_scroll);
+        let start = transcript
+            .len()
+            .saturating_sub(visible)
+            .saturating_sub(self.agent_scroll);
+        let lines = transcript
             .iter()
             .skip(start)
             .take(visible)
             .enumerate()
-        {
-            let row = sections[0].y + 1 + offset as u16;
-            if let Some(path) = &message.path {
-                self.agent_hits.push((row, path.clone()));
-            }
-            lines.push(Line::styled(
-                message.text.replace('\n', " "),
-                Style::default().fg(if message.path.is_some() {
-                    theme::BLUE
-                } else {
-                    theme::TEXT
-                }),
-            ));
-        }
+            .map(|(offset, (line, path))| {
+                let row = sections[0].y + 1 + offset as u16;
+                if let Some(path) = path {
+                    self.agent_hits.push((row, path.clone()));
+                }
+                line.clone()
+            })
+            .collect::<Vec<_>>();
         let status = match &self.agent_backend_status {
             BuiltinAgentStatus::Idle => "Agent",
             BuiltinAgentStatus::Starting => "Codex — connecting…",
             BuiltinAgentStatus::SignIn => "Codex — press Enter to sign in",
+            BuiltinAgentStatus::Ready if self.agent_scroll > 0 => "Codex — history (End: latest)",
             BuiltinAgentStatus::Ready => "Codex — ready",
             BuiltinAgentStatus::Working => "Codex — working (Esc stops)",
             BuiltinAgentStatus::LoginCode { .. } => "Codex — waiting for sign-in",
@@ -3417,7 +3568,6 @@ impl Editor {
         };
         frame.render_widget(
             Paragraph::new(lines)
-                .wrap(ratatui::widgets::Wrap { trim: true })
                 .style(Style::default().bg(theme::MANTLE))
                 .block(
                     Block::bordered()
@@ -4152,6 +4302,29 @@ fn default_binding(command: Command) -> &'static str {
     }
 }
 
+fn wrap_agent_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut wrapped = Vec::new();
+    for source_line in text.split('\n') {
+        let mut line = String::new();
+        let mut line_width = 0;
+        for grapheme in source_line.graphemes(true) {
+            let grapheme_width = UnicodeWidthStr::width(grapheme);
+            if !line.is_empty() && line_width + grapheme_width > width {
+                wrapped.push(std::mem::take(&mut line));
+                line_width = 0;
+            }
+            line.push_str(grapheme);
+            line_width += grapheme_width;
+        }
+        wrapped.push(line);
+    }
+    if wrapped.is_empty() {
+        wrapped.push(String::new());
+    }
+    wrapped
+}
+
 fn key_event_name(key: &KeyEvent) -> String {
     let mut parts = Vec::new();
     if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -4192,6 +4365,45 @@ fn required_u64(params: &Value, key: &str) -> Result<u64, String> {
         .get(key)
         .and_then(Value::as_u64)
         .ok_or_else(|| format!("missing or invalid {key}"))
+}
+
+fn agent_position(buffer: &Buffer, value: &Value) -> Result<(usize, usize, usize), String> {
+    let line = required_u64(value, "line")? as usize;
+    let column = required_u64(value, "column")? as usize;
+    if line >= buffer.len_lines() {
+        return Err(format!("line {line} is outside the file"));
+    }
+    let content = buffer.line(line);
+    let content = content.trim_end_matches(['\n', '\r']);
+    let columns = content.chars().count();
+    if column > columns {
+        return Err(format!(
+            "column {column} is outside line {line} (maximum {columns})"
+        ));
+    }
+    Ok((buffer.line_start_char(line) + column, line, column))
+}
+
+fn agent_offset_position(buffer: &Buffer, offset: usize) -> (usize, usize) {
+    for line in (0..buffer.len_lines()).rev() {
+        let start = buffer.line_start_char(line);
+        if offset >= start {
+            return (line, offset - start);
+        }
+    }
+    (0, 0)
+}
+
+fn inserted_end_position(line: usize, column: usize, text: &str) -> (usize, usize) {
+    let added_lines = text.chars().filter(|character| *character == '\n').count();
+    if added_lines == 0 {
+        (line, column + text.chars().count())
+    } else {
+        (
+            line + added_lines,
+            text.rsplit('\n').next().unwrap_or_default().chars().count(),
+        )
+    }
 }
 
 fn collect_workspace_files(root: &Path, limit: usize) -> Vec<PathBuf> {
@@ -4254,7 +4466,10 @@ mod input_tests {
     use crate::buffer::Buffer;
     use crate::explorer::Explorer;
 
-    use super::{control_letter, key_event_name, valid_entry_name, Command, Editor};
+    use super::{
+        control_letter, key_event_name, valid_entry_name, AgentMessage, AgentMessageKind, Command,
+        Editor,
+    };
 
     #[test]
     fn maps_raw_control_characters() {
@@ -4688,6 +4903,92 @@ mod input_tests {
     }
 
     #[test]
+    fn native_agent_edit_inserts_at_cursor_and_returns_range() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("file with spaces.txt");
+        fs::write(&path, "hello").unwrap();
+        let mut editor = Editor::new(vec![root.path().to_path_buf(), path]);
+        let result = editor
+            .execute_agent_method(
+                "editor.edit_text",
+                &json!({"path":"file with spaces.txt","revision":0,"operation":"insert","line":0,"column":5,"text":" world"}),
+            )
+            .unwrap();
+        assert_eq!(editor.current().text(), "hello world");
+        assert_eq!(result["range"]["start"], json!({"line":0,"column":5}));
+        assert_eq!(result["range"]["end"], json!({"line":0,"column":11}));
+    }
+
+    #[test]
+    fn native_agent_edit_replaces_unicode_selection_with_multiline_text() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("unicode.txt");
+        fs::write(&path, "a🦀z\r\nnext\r\n").unwrap();
+        let mut editor = Editor::new(vec![root.path().to_path_buf(), path]);
+        let result = editor
+            .execute_agent_method(
+                "editor.edit_text",
+                &json!({
+                    "path":"unicode.txt","revision":0,"operation":"replace_selection",
+                    "selection":{"start":{"line":0,"column":1},"end":{"line":0,"column":2}},
+                    "text":"β\r\nγ"
+                }),
+            )
+            .unwrap();
+        assert_eq!(editor.current().text(), "aβ\nγz\nnext\n");
+        assert_eq!(result["range"]["end"], json!({"line":1,"column":1}));
+        editor.current_mut().save().unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join("unicode.txt")).unwrap(),
+            "aβ\r\nγz\r\nnext\r\n"
+        );
+    }
+
+    #[test]
+    fn native_agent_edit_appends_to_empty_file_and_rejects_stale_state() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("empty.txt");
+        fs::write(&path, "").unwrap();
+        let mut editor = Editor::new(vec![root.path().to_path_buf(), path]);
+        editor
+            .execute_agent_method(
+                "editor.edit_text",
+                &json!({"path":"empty.txt","revision":0,"operation":"append","text":"first\nsecond"}),
+            )
+            .unwrap();
+        assert_eq!(editor.current().text(), "first\nsecond");
+        let error = editor
+            .execute_agent_method(
+                "editor.edit_text",
+                &json!({"path":"empty.txt","revision":0,"operation":"append","text":"lost"}),
+            )
+            .unwrap_err();
+        assert!(error.contains("stale editor state"));
+        assert_eq!(editor.current().text(), "first\nsecond");
+    }
+
+    #[test]
+    fn native_agent_edit_enforces_workspace_boundary() {
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("inside.txt"), "inside").unwrap();
+        fs::write(parent.path().join("outside.txt"), "outside").unwrap();
+        let mut editor = Editor::new(vec![root.clone(), root.join("inside.txt")]);
+        let error = editor
+            .execute_agent_method(
+                "editor.edit_text",
+                &json!({"path":"../outside.txt","revision":0,"operation":"append","text":"bad"}),
+            )
+            .unwrap_err();
+        assert_eq!(error, "path escapes workspace");
+        assert_eq!(
+            fs::read_to_string(parent.path().join("outside.txt")).unwrap(),
+            "outside"
+        );
+    }
+
+    #[test]
     fn agent_prompt_queue_and_streamed_response() {
         let mut editor = Editor::new(Vec::new());
         editor.enqueue_agent_prompt("please review".into());
@@ -4748,6 +5049,57 @@ mod input_tests {
             .key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(editor.current().text(), "x");
+    }
+
+    #[test]
+    fn agent_conversation_labels_roles_and_scrolls_independently() {
+        let mut editor = Editor::new(Vec::new());
+        editor.agent_panel_visible = true;
+        editor.agent_panel_focused = true;
+        for index in 0..20 {
+            editor.agent_messages.push(AgentMessage {
+                text: format!("older message {index}"),
+                path: None,
+                kind: AgentMessageKind::Activity,
+            });
+        }
+        editor.agent_messages.push(AgentMessage {
+            text: "my request".into(),
+            path: None,
+            kind: AgentMessageKind::Human,
+        });
+        editor.agent_messages.push(AgentMessage {
+            text: "agent answer".into(),
+            path: None,
+            kind: AgentMessageKind::Agent,
+        });
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| editor.render(frame)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("YOU"));
+        assert!(rendered.contains("CODEX"));
+
+        let area = editor.agent_area.unwrap();
+        editor
+            .handle_event(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: area.x + 1,
+                row: area.y + 1,
+                modifiers: KeyModifiers::NONE,
+            }))
+            .unwrap();
+        assert_eq!(editor.agent_scroll, 3);
+        editor
+            .agent_panel_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(editor.agent_scroll, 0);
     }
 
     #[test]

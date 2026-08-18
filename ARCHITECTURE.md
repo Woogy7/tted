@@ -22,3 +22,11 @@ buffers, panels, and popups instead of introducing a second UI framework.
 Rope revisions guard external/agent edits against stale state. Terminal setup
 is protected by an RAII guard so raw mode, alternate screen, mouse reporting,
 focus reporting, bracketed paste, and cursor visibility are restored on exit.
+
+The built-in Codex backend normally uses App Server with workspace-write roots
+limited to the active workspace. Direct network namespace isolation is avoided
+because Bubblewrap cannot configure loopback in some nested containers. When
+`CODEX_PERMISSION_PROFILE` proves TTED already runs inside a Codex-enforced
+filesystem boundary, App Server receives `externalSandbox` rather than trying
+to nest Bubblewrap; the parent boundary remains authoritative. TTED never uses
+that fallback merely because Bubblewrap is missing or fails.

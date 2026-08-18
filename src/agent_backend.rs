@@ -67,6 +67,7 @@ fn send(stdin: &mut impl Write, value: Value) -> bool {
 }
 
 fn run_codex(workspace: PathBuf, commands: Receiver<BackendCommand>, events: Sender<BackendEvent>) {
+    let externally_sandboxed = std::env::var_os("CODEX_PERMISSION_PROFILE").is_some();
     let _ = events.send(BackendEvent::Starting);
     if Command::new("codex").arg("--version").output().is_err() {
         let _ = events.send(BackendEvent::Missing);
@@ -133,12 +134,20 @@ fn run_codex(workspace: PathBuf, commands: Receiver<BackendCommand>, events: Sen
                 &mut stdin,
                 &workspace,
                 &mut next_id,
+                externally_sandboxed,
             );
         }
         match commands.recv_timeout(Duration::from_millis(20)) {
             Ok(BackendCommand::Prompt(prompt)) => {
                 if let Some(thread_id) = &thread_id {
-                    start_turn(&mut stdin, &workspace, thread_id, prompt, &mut next_id);
+                    start_turn(
+                        &mut stdin,
+                        &workspace,
+                        thread_id,
+                        prompt,
+                        &mut next_id,
+                        externally_sandboxed,
+                    );
                 } else {
                     queued_prompt = Some(prompt);
                 }
@@ -192,19 +201,25 @@ fn start_turn(
     thread_id: &str,
     prompt: String,
     next_id: &mut u64,
+    externally_sandboxed: bool,
 ) {
+    let sandbox = if externally_sandboxed {
+        json!({"type":"externalSandbox","networkAccess":"restricted"})
+    } else {
+        json!({
+            "type":"workspaceWrite",
+            "writableRoots":[workspace],
+            "networkAccess":true
+        })
+    };
     send(
         stdin,
         json!({"method":"turn/start","id":*next_id,"params":{
             "threadId":thread_id,
             "input":[{"type":"text","text":prompt}],
             "cwd":workspace,
-            "approvalPolicy":"on-request",
-            "sandboxPolicy":{
-                "type":"workspaceWrite",
-                "writableRoots":[workspace],
-                "networkAccess":false
-            }
+            "approvalPolicy":"untrusted",
+            "sandboxPolicy":sandbox
         }}),
     );
     *next_id += 1;
@@ -220,6 +235,7 @@ fn handle_message(
     stdin: &mut impl Write,
     workspace: &PathBuf,
     next_id: &mut u64,
+    externally_sandboxed: bool,
 ) {
     if message.get("id") == Some(&json!(2)) {
         let authenticated = message
@@ -234,7 +250,7 @@ fn handle_message(
             .and_then(Value::as_str)
             .map(str::to_owned);
         if let (Some(id), Some(prompt)) = (thread_id.as_deref(), queued_prompt.take()) {
-            start_turn(stdin, workspace, id, prompt, next_id);
+            start_turn(stdin, workspace, id, prompt, next_id, externally_sandboxed);
         }
     }
     if message.get("id") == Some(&json!(4)) {
@@ -257,16 +273,18 @@ fn handle_message(
         return;
     };
     if let Some(id) = message.get("id") {
+        if method == "item/fileChange/requestApproval" {
+            send(
+                stdin,
+                json!({"id":id,"result":{"decision":"acceptForSession"}}),
+            );
+            return;
+        }
         let detail = match method {
             "item/commandExecution/requestApproval" => message
                 .pointer("/params/command")
                 .map(display_approval_value)
                 .unwrap_or_else(|| "run a workspace command".into()),
-            "item/fileChange/requestApproval" => message
-                .pointer("/params/reason")
-                .and_then(Value::as_str)
-                .unwrap_or("edit workspace files")
-                .to_owned(),
             _ => String::new(),
         };
         if !detail.is_empty() {
@@ -375,6 +393,7 @@ mod tests {
             &mut output,
             &PathBuf::from("."),
             &mut id,
+            false,
         );
         assert_eq!(
             receiver.recv().unwrap(),
@@ -399,6 +418,7 @@ mod tests {
             &mut output,
             &PathBuf::from("."),
             &mut next_id,
+            false,
         );
         assert_eq!(
             receiver.recv().unwrap(),
@@ -410,7 +430,34 @@ mod tests {
     }
 
     #[test]
-    fn turn_uses_supported_interactive_approval_policy() {
+    fn accepts_workspace_file_changes_for_the_session() {
+        let (events, receiver) = mpsc::channel();
+        let mut thread = None;
+        let mut turn = None;
+        let mut queued = None;
+        let mut output = Vec::new();
+        let mut next_id = 10;
+        handle_message(
+            &json!({"id":43,"method":"item/fileChange/requestApproval","params":{"reason":"write probe.txt"}}),
+            &events,
+            &mut thread,
+            &mut turn,
+            &mut queued,
+            &mut output,
+            &PathBuf::from("."),
+            &mut next_id,
+            false,
+        );
+        let response: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            response,
+            json!({"id":43,"result":{"decision":"acceptForSession"}})
+        );
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn turn_uses_workspace_scoped_nested_container_safe_policy() {
         let mut output = Vec::new();
         let mut next_id = 10;
         start_turn(
@@ -419,11 +466,43 @@ mod tests {
             "thread-1",
             "help".into(),
             &mut next_id,
+            false,
         );
         let request: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(
             request.pointer("/params/approvalPolicy"),
-            Some(&json!("on-request"))
+            Some(&json!("untrusted"))
+        );
+        assert_eq!(
+            request.pointer("/params/sandboxPolicy/type"),
+            Some(&json!("workspaceWrite"))
+        );
+        assert_eq!(
+            request.pointer("/params/sandboxPolicy/writableRoots/0"),
+            Some(&json!("/workspace"))
+        );
+        assert_eq!(
+            request.pointer("/params/sandboxPolicy/networkAccess"),
+            Some(&json!(true))
+        );
+    }
+
+    #[test]
+    fn externally_confined_turn_does_not_start_nested_bubblewrap() {
+        let mut output = Vec::new();
+        let mut next_id = 10;
+        start_turn(
+            &mut output,
+            &PathBuf::from("/workspace"),
+            "thread-1",
+            "help".into(),
+            &mut next_id,
+            true,
+        );
+        let request: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            request.pointer("/params/sandboxPolicy"),
+            Some(&json!({"type":"externalSandbox","networkAccess":"restricted"}))
         );
     }
 }

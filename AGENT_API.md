@@ -31,6 +31,7 @@ Write capability:
 
 - `editor.open { path }`
 - `editor.focus_range { buffer_id, line, column }`
+- `editor.edit_text { path, revision, operation, line?, column?, selection?, text }`
 - `edit.apply { buffer_id, revision, start, end, text }`
 - `edit.apply_batch { edits: [...] }`
 
@@ -50,3 +51,22 @@ Paths are workspace-relative and cannot escape the workspace. Configure access
 under `[agent]` in `.tted.toml`. Read access defaults on; all mutation, file,
 and command capabilities default off. TTED remains fully usable with the API
 disabled.
+
+### Native positional editing
+
+`editor.edit_text` opens the workspace-relative `path` when needed and applies
+one atomic buffer transaction. `operation` is `insert`, `replace_selection`, or
+`append`. Insert requires top-level `line` and `column`; replacement requires
+`selection.start` and `selection.end`, each containing `line` and `column`.
+Append ignores positions.
+
+Lines and columns are zero-based Unicode scalar-value indexes, not UTF-8 byte or
+UTF-16 offsets. CRLF and lone-CR replacement text is normalized to LF inside
+the buffer; saving uses the file's detected line-ending style. Files are UTF-8,
+unmentioned content is preserved, and `revision` must match current editor
+state. The result includes the new revision plus zero-based start/end positions
+and character offsets for the inserted range.
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"editor.edit_text","params":{"path":"notes/my file.md","revision":4,"operation":"replace_selection","selection":{"start":{"line":2,"column":3},"end":{"line":2,"column":8}},"text":"new text"}}
+```

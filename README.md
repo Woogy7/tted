@@ -140,8 +140,9 @@ F9 opens a collapsible, conventional Agent chat. TTED automatically detects an
 installed Codex CLI, reuses its sign-in, or presents a clickable device-code
 setup. Type a request and press Enter; Shift+Enter inserts a newline. Responses,
 commands, edits, completion, and errors stream into the panel. Stop, Retry, New,
-Clear, Diff, Accept, and Revert are clickable. Codex is confined to the current
-workspace, and Revert refuses to overwrite later human changes. The existing
+Clear, Diff, Accept, and Revert are clickable. The role-labeled conversation has
+independent mouse/Page scrolling. Codex is confined to workspace writes without
+routine prompts, and Revert refuses to overwrite later human changes. The existing
 provider-neutral socket API remains available for advanced/custom backends.
 
 When an open file changes on disk, TTED reloads it automatically if the editor

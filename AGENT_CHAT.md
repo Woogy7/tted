@@ -17,9 +17,16 @@ Codex can inspect and edit only the current workspace. Its answer, commands,
 file-edit activity, errors, and completion state appear in the pane. Files
 refresh in the normal editor area when work finishes.
 
-When Codex needs permission for a command or file operation, TTED pauses and
-shows a centered explanation. Click the left or right side, or press Enter/Y to
-allow the action once and Esc/N to decline it.
+Human messages are labeled **YOU** on a tinted background; replies are labeled
+**CODEX**, while activity and errors use quieter dot and warning rows. Scroll
+conversation history with the mouse wheel or Page Up/Down. Home jumps to the
+oldest history and End returns to the latest message.
+
+Ordinary reads, workspace edits, patches, and validation run without repeated
+approval prompts. Codex still receives a workspace-write filesystem sandbox:
+outside-workspace writes remain blocked. If TTED is itself running inside a
+Codex permission profile, it reuses that outer boundary instead of nesting a
+second Bubblewrap sandbox that the container may not permit.
 
 Controls:
 
