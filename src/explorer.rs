@@ -25,10 +25,22 @@ pub struct Explorer {
     selected: usize,
     scroll: usize,
     focused: bool,
+    show_hidden: bool,
+    show_build_directories: bool,
+    max_entries: usize,
 }
 
 impl Explorer {
     pub fn new(root: PathBuf) -> Self {
+        Self::with_options(root, false, false, 5_000)
+    }
+
+    pub fn with_options(
+        root: PathBuf,
+        show_hidden: bool,
+        show_build_directories: bool,
+        max_entries: usize,
+    ) -> Self {
         let mut explorer = Self {
             root,
             expanded: HashSet::new(),
@@ -36,6 +48,9 @@ impl Explorer {
             selected: 0,
             scroll: 0,
             focused: false,
+            show_hidden,
+            show_build_directories,
+            max_entries: max_entries.max(1),
         };
         explorer.refresh();
         explorer
@@ -172,7 +187,7 @@ impl Explorer {
     }
 
     fn collect_directory(&self, directory: &Path, depth: usize, rows: &mut Vec<ExplorerRow>) {
-        if rows.len() >= 5_000 {
+        if rows.len() >= self.max_entries {
             return;
         }
         let Ok(entries) = fs::read_dir(directory) else {
@@ -181,12 +196,14 @@ impl Explorer {
         let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
         entries.sort_by_key(|entry| (!entry.path().is_dir(), entry.file_name()));
         for entry in entries {
-            if rows.len() >= 5_000 {
+            if rows.len() >= self.max_entries {
                 break;
             }
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if excluded(&name) {
+            if (!self.show_hidden && name.starts_with('.'))
+                || (!self.show_build_directories && build_directory(&name))
+            {
                 continue;
             }
             let path = entry.path();
@@ -205,8 +222,8 @@ impl Explorer {
     }
 }
 
-fn excluded(name: &str) -> bool {
-    name.starts_with('.') || matches!(name, "target" | "node_modules" | "dist" | "build")
+fn build_directory(name: &str) -> bool {
+    matches!(name, "target" | "node_modules" | "dist" | "build")
 }
 
 #[cfg(test)]
@@ -255,5 +272,15 @@ mod tests {
         let explorer = Explorer::new(root.path().to_path_buf());
         assert_eq!(explorer.rows().len(), 1);
         assert_eq!(explorer.rows()[0].path.file_name().unwrap(), "visible.txt");
+    }
+
+    #[test]
+    fn configured_visibility_and_limit_are_applied() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join(".hidden"), "ok").unwrap();
+        fs::write(root.path().join("visible"), "ok").unwrap();
+        let explorer = Explorer::with_options(root.path().to_path_buf(), true, false, 1);
+        assert_eq!(explorer.rows().len(), 1);
+        assert_eq!(explorer.rows()[0].path.file_name().unwrap(), ".hidden");
     }
 }

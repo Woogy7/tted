@@ -28,6 +28,7 @@ pub struct GitSnapshot {
     pub branch: Option<String>,
     pub files: HashMap<PathBuf, char>,
     pub lines: HashMap<PathBuf, HashMap<usize, char>>,
+    diff_text: String,
     stamps: HashMap<PathBuf, FileStamp>,
 }
 
@@ -48,6 +49,56 @@ impl GitSnapshot {
         let relative = path.strip_prefix(root).ok()?;
         self.lines.get(relative)?.get(&line).copied()
     }
+    pub fn status_text(&self) -> String {
+        let Some(root) = &self.root else {
+            return "Not inside a Git repository.\n".into();
+        };
+        let mut text = format!(
+            "Repository: {}\nBranch: {}\n\n",
+            root.display(),
+            self.branch.as_deref().unwrap_or("(detached HEAD)")
+        );
+        if self.files.is_empty() {
+            text.push_str("Working tree clean.\n");
+            return text;
+        }
+        let mut files = self.files.iter().collect::<Vec<_>>();
+        files.sort_unstable_by_key(|(path, _)| *path);
+        text.push_str("Changes:\n");
+        for (path, status) in files {
+            text.push_str(&format!("  {status}  {}\n", path.display()));
+        }
+        text
+    }
+    pub fn workspace_diff(&self) -> String {
+        if self.diff_text.is_empty() {
+            "No tracked workspace changes. Untracked files appear in Git Status.\n".into()
+        } else {
+            self.diff_text.clone()
+        }
+    }
+    pub fn file_diff(&self, path: &Path) -> String {
+        let Some(root) = &self.root else {
+            return "Not inside a Git repository.\n".into();
+        };
+        let Ok(relative) = path.strip_prefix(root) else {
+            return "The current file is outside the Git repository.\n".into();
+        };
+        let relative = relative.to_string_lossy();
+        let sections = self.diff_text.split("diff --git ").skip(1);
+        let matching = sections
+            .filter(|section| {
+                section.contains(&format!("+++ b/{relative}\n"))
+                    || section.contains(&format!("--- a/{relative}\n"))
+            })
+            .map(|section| format!("diff --git {section}"))
+            .collect::<String>();
+        if matching.is_empty() {
+            format!("No tracked changes for {}.\n", relative)
+        } else {
+            matching
+        }
+    }
 }
 
 pub struct GitService {
@@ -57,11 +108,15 @@ pub struct GitService {
     pending: bool,
     last_request: Instant,
     snapshot: GitSnapshot,
+    operation_sender: mpsc::Sender<String>,
+    operation_receiver: Receiver<String>,
+    operation_pending: bool,
 }
 
 impl GitService {
     pub fn new(workspace: PathBuf) -> Self {
         let (sender, receiver) = mpsc::channel();
+        let (operation_sender, operation_receiver) = mpsc::channel();
         let mut service = Self {
             workspace,
             receiver,
@@ -69,6 +124,9 @@ impl GitService {
             pending: false,
             last_request: Instant::now() - Duration::from_secs(10),
             snapshot: GitSnapshot::default(),
+            operation_sender,
+            operation_receiver,
+            operation_pending: false,
         };
         service.request_refresh();
         service
@@ -89,6 +147,64 @@ impl GitService {
             self.request_refresh();
         }
         changed
+    }
+
+    pub fn take_operation_message(&mut self) -> Option<String> {
+        let message = self.operation_receiver.try_recv().ok()?;
+        self.operation_pending = false;
+        self.request_refresh();
+        Some(message)
+    }
+
+    pub fn stage(&mut self, path: &Path) -> bool {
+        self.start_file_operation(path, "stage", vec!["add", "--"])
+    }
+
+    pub fn unstage(&mut self, path: &Path) -> bool {
+        self.start_file_operation(path, "unstage", vec!["restore", "--staged", "--"])
+    }
+
+    pub fn discard(&mut self, path: &Path) -> bool {
+        self.start_file_operation(path, "discard", vec!["restore", "--worktree", "--"])
+    }
+
+    pub fn commit(&mut self, message: String) -> bool {
+        let Some(root) = self.snapshot.root.clone() else {
+            return false;
+        };
+        self.start_operation(root, "commit", vec!["commit".into(), "-m".into(), message])
+    }
+
+    fn start_file_operation(&mut self, path: &Path, label: &'static str, args: Vec<&str>) -> bool {
+        let Some(root) = self.snapshot.root.clone() else {
+            return false;
+        };
+        let Ok(relative) = path.strip_prefix(&root) else {
+            return false;
+        };
+        let mut owned = args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        owned.push(relative.to_string_lossy().into_owned());
+        self.start_operation(root, label, owned)
+    }
+
+    fn start_operation(&mut self, root: PathBuf, label: &'static str, args: Vec<String>) -> bool {
+        if self.operation_pending {
+            return false;
+        }
+        self.operation_pending = true;
+        let sender = self.operation_sender.clone();
+        thread::spawn(move || {
+            let arguments = args.iter().map(String::as_str).collect::<Vec<_>>();
+            let success = run_git(&root, &arguments, Duration::from_secs(15)).is_some();
+            let message = if success {
+                format!("Git {label} completed")
+            } else {
+                format!("Git {label} failed; see diagnostics log")
+            };
+            diagnostics::log(&message);
+            let _ = sender.send(message);
+        });
+        true
     }
 
     pub fn request_refresh(&mut self) {
@@ -147,8 +263,8 @@ fn read_snapshot(workspace: &Path, previous: &GitSnapshot) -> GitSnapshot {
     let unchanged = previous.root.as_ref() == Some(&root)
         && previous.files == files
         && previous.stamps == stamps;
-    let mut lines = if unchanged {
-        previous.lines.clone()
+    let (mut lines, diff_text) = if unchanged {
+        (previous.lines.clone(), previous.diff_text.clone())
     } else {
         let diff = run_git(
             &root,
@@ -163,7 +279,10 @@ fn read_snapshot(workspace: &Path, previous: &GitSnapshot) -> GitSnapshot {
             Duration::from_secs(4),
         )
         .unwrap_or_default();
-        parse_diff(&diff)
+        (
+            parse_diff(&diff),
+            String::from_utf8_lossy(&diff).into_owned(),
+        )
     };
     if !unchanged {
         for (path, status) in &files {
@@ -179,6 +298,7 @@ fn read_snapshot(workspace: &Path, previous: &GitSnapshot) -> GitSnapshot {
         branch,
         files,
         lines,
+        diff_text,
         stamps,
     }
 }
@@ -387,5 +507,26 @@ mod tests {
         assert_eq!(file[&6], 'A');
         assert_eq!(file[&7], 'A');
         assert_eq!(file[&11], 'D');
+    }
+
+    #[test]
+    fn formats_status_and_extracts_one_file_diff() {
+        let diff_text = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-old\n+new\ndiff --git a/src/b.rs b/src/b.rs\n--- a/src/b.rs\n+++ b/src/b.rs\n@@ -1 +1 @@\n-x\n+y\n";
+        let snapshot = GitSnapshot {
+            root: Some(PathBuf::from("/repo")),
+            branch: Some("main".into()),
+            files: HashMap::from([
+                (PathBuf::from("src/b.rs"), 'M'),
+                (PathBuf::from("src/a.rs"), 'M'),
+            ]),
+            diff_text: diff_text.into(),
+            ..GitSnapshot::default()
+        };
+        let status = snapshot.status_text();
+        assert!(status.contains("Branch: main"));
+        assert!(status.find("src/a.rs").unwrap() < status.find("src/b.rs").unwrap());
+        let file = snapshot.file_diff(Path::new("/repo/src/a.rs"));
+        assert!(file.contains("+new"));
+        assert!(!file.contains("src/b.rs"));
     }
 }

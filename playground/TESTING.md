@@ -198,6 +198,22 @@ Expected: the branch is shown with `✓` or `*`, editing never pauses during Git
 refreshes, files receive subtle `M`, `A`, `?`, or `D` decorations, and changed
 lines receive green added, peach modified, or red deletion gutter markers.
 
+4. Open the Command Palette and run `Git: Open Status`.
+5. Run the current-file and workspace diff commands.
+6. Navigate and select/copy text, then verify typing and saving are rejected.
+
+Expected: each view opens in a reusable read-only tab, the current-file view is
+limited to that file, and diff additions/removals are syntax highlighted.
+
+7. Save a modified tracked file, then run `Git: Stage Current File` and inspect
+   Git Status after the operation completes.
+8. Run `Git: Unstage Current File`, then try discard first with unsaved editor
+   content and again after saving. Cancel once before confirming.
+9. Stage a harmless test change and run `Git: Commit Staged Changes`.
+
+Expected: stage/unstage keep the editor responsive, unsaved content blocks
+discard, discard has a centered warning, and an empty commit message is refused.
+
 ## Deferred features
 
 These are planned but are not expected to work in the current build:

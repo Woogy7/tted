@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "A modern terminal text editor"
+repository = "https://github.com/Woogy7/tted"
+readme = "README.md"
+keywords = ["editor", "terminal", "tui", "text-editor"]
+categories = ["command-line-utilities", "text-editors"]
+exclude = ["test-new.txt", "test2.txt", "test3", "tester3"]
 
 [dependencies]
 anyhow = "1.0"
@@ -12,7 +17,10 @@ crossterm = "0.28"
 pulldown-cmark = "0.13"
 ratatui = "0.29"
 ropey = "1.6"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 syntect = { version = "5.2", default-features = false, features = ["default-syntaxes", "default-themes", "parsing", "regex-fancy"] }
+toml = "0.9"
 unicode-segmentation = "1.12"
 unicode-width = "0.2"
 

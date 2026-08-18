@@ -1,9 +1,13 @@
+pub mod agent;
 pub mod buffer;
 pub mod command;
+pub mod config;
 pub mod diagnostics;
 pub mod editor;
 pub mod explorer;
 pub mod git;
+pub mod lsp;
 pub mod markdown;
 pub mod quick_open;
+pub mod service;
 pub mod theme;

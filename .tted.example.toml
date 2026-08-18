@@ -1,0 +1,30 @@
+[editor]
+tab_width = 4
+use_spaces = true
+line_numbers = true
+word_wrap = false
+theme = "base16-eighties.dark"
+
+[keybindings]
+"ctrl+e" = "workspace.toggle_explorer"
+
+[agent]
+enabled = true
+allow_read = true
+allow_write = false
+allow_file_create = false
+allow_file_delete = false
+allow_commands = false
+
+[explorer]
+show_hidden = false
+show_build_directories = false
+max_entries = 5000
+
+[language_servers.rs]
+command = "rust-analyzer"
+language_id = "rust"
+
+# [language_servers.py]
+# command = "pylsp"
+# language_id = "python"

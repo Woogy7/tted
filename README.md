@@ -4,7 +4,7 @@ TTED (Terminal Text Editor) is an early-stage, conventional terminal text editor
 It is designed to work naturally in ordinary terminals, SSH sessions, tmux, and
 Herdr without requiring an AI agent.
 
-## Current v0.1 foundation
+## Current v0.1
 
 - UTF-8 text buffers backed by a rope
 - multiple files displayed as tabs
@@ -25,18 +25,30 @@ Herdr without requiring an AI agent.
 - automatic clean-file reload and explicit reload/keep prompts for disk conflicts
 - background Git branch/clean-state detection and explorer file decorations
 - Git added/modified/deleted line markers in the editor gutter
+- read-only Git status, current-file diff, and workspace-diff tabs
 
-Git, LSP, and the agent API remain deferred while the workspace experience is
-developed further.
+- configured language-server diagnostics, navigation, completion, and edits
+- two-pane split editing
+- a permission-scoped structured agent API and optional integrated Agent panel
+- optional TOML configuration for editing, keybindings, explorer, LSP, and agents
 
 ## Build and run
 
 ```sh
 cargo build
-cargo run -- path/to/file another/file
+cargo run -- .
+cargo run -- README.md
+cargo run -- file1.rs file2.rs
 ```
 
 With no filenames TTED opens an untitled buffer; Ctrl+S then prompts for a path.
+Passing a directory selects that workspace and opens its explorer.
+
+For released builds, download a platform archive or run:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/Woogy7/tted/main/install.sh | sh
+```
 
 ## Keys
 
@@ -88,6 +100,15 @@ Ctrl+Shift+P opens the Command Palette. Commands can be found by fuzzy title or
 stable ID, then run with Enter. Right-click an explorer item to surface its file
 operations without memorizing the explorer keys.
 
+The Command Palette also provides `Git: Open Status`, `Git: Open Current File
+Diff`, and `Git: Open Workspace Diff`. These views open as read-only tabs; close
+them normally with Ctrl+W.
+
+File-level Git actions are also available from the Command Palette: stage or
+unstage the current saved file, discard its tracked changes after confirmation,
+and commit staged changes with a message. Git operations run in the background.
+TTED deliberately does not delete untracked files or provide push/pull actions.
+
 Inside a Git repository, the status bar shows the branch plus `✓` for clean or
 `*` for dirty. Explorer files use subtle `M`, `A`, `?`, and `D` decorations.
 The line-number gutter marks added lines in green, modified lines in peach, and
@@ -95,6 +116,27 @@ deletion points in red.
 
 TTED writes lightweight diagnostic and Git-worker timing logs to
 `/tmp/tted-<pid>.log`. Set `TTED_LOG=/path/to/file.log` to choose another path.
+
+Language servers are configured by extension in `.tted.toml`; copy
+`.tted.example.toml` as a starting point. Diagnostics appear in the gutter,
+explorer, and the collapsible Problems panel. Hover, definition, completion,
+references, rename, formatting, symbols, code actions, signature help, and
+server restart are available from the Command Palette. F8 opens Problems and
+jumps through diagnostics.
+
+The Command Palette can split the editor right or down, focus the adjacent
+split, and close the split. Panes reference the same underlying open buffers;
+clicking an inactive pane focuses it.
+
+An optional structured agent API listens on `/tmp/tted-<pid>.sock` by default.
+It uses stable buffer IDs and revision-checked JSON-RPC edits rather than
+terminal scraping or simulated keys. Mutation permissions default off; see
+`AGENT_API.md` and `.tted.example.toml`.
+
+The Command Palette opens a collapsible Agent panel with prompt input, streamed
+activity, clickable file references, View Diff, Accept, and Revert controls.
+Context commands can explain/refactor a selection, request tests, or review the
+current diff without coupling TTED to an AI provider.
 
 When an open file changes on disk, TTED reloads it automatically if the editor
 buffer is clean. If unsaved edits could be lost, use `R` to reload the disk
@@ -107,4 +149,9 @@ with Save.
 cargo fmt --check
 cargo test
 cargo clippy --all-targets -- -D warnings
+cargo build --release
 ```
+
+Documentation: [keybindings](KEYBINDINGS.md), [configuration](CONFIGURATION.md),
+[architecture](ARCHITECTURE.md), [agent API](AGENT_API.md),
+[contributing](CONTRIBUTING.md), and [changelog](CHANGELOG.md).

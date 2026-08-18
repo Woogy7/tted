@@ -524,6 +524,10 @@ numbers. Untracked file lines are treated as additions.
 
 Provide simple views for:
 
+**✅ Completed.** Command Palette actions open repository status, the current
+file diff, or the workspace diff as reusable read-only tabs. Diff tabs reuse the
+normal editor renderer and syntax highlighting.
+
 - repository status;
 - current file diff;
 - workspace diff.
@@ -533,6 +537,12 @@ Prefer reusing TTED's normal buffer/view system.
 ## 4.5 Write operations
 
 Only after read-only Git functionality is reliable, consider:
+
+**✅ Completed at safe file-level scope.** Command Palette actions stage or
+unstage the current saved file, discard its tracked working-tree changes behind
+a centered destructive confirmation, and commit staged changes through a
+centered message dialog. Operations run in a bounded background worker. TTED
+does not delete untracked files or expose push, pull, or branch operations.
 
 - stage;
 - unstage;
@@ -545,9 +555,17 @@ Do not implement push/pull/branch-management complexity at this stage.
 
 A developer can understand what has changed in the repository without leaving TTED.
 
+**✅ Met for the read-only Phase 4 scope.**
+
 ---
 
 # Phase 5 — Background Service Architecture
+
+**Status: ✅ Complete.** TTED now has a small typed background-service boundary
+with command and event channels, streamed output and errors, cooperative
+cancellation, managed child-process cleanup, named worker threads, and graceful
+join-on-drop. Git remains isolated from editor mutation and LSP/agent services
+can reuse this boundary without introducing a general async runtime.
 
 ## Goal
 
@@ -585,9 +603,15 @@ Implement only what upcoming features require.
 
 TTED can perform background work without blocking typing, scrolling, or rendering.
 
+**✅ Met.**
+
 ---
 
 # Phase 6 — LSP
+
+**Status: ✅ Complete.** Configured language servers run through TTED's managed
+background-service boundary with framed JSON-RPC, debounced full-document sync,
+save notifications, graceful shutdown, visible status, and manual restart.
 
 ## Goal
 
@@ -596,6 +620,9 @@ Give TTED modern code intelligence while keeping the editor itself language-agno
 Start with a small, useful LSP implementation.
 
 ## 6.1 Language server lifecycle
+
+**✅ Completed.** `.tted.toml` maps file extensions to a command, arguments, and
+language ID. Servers initialize on demand and receive open/change/save events.
 
 Support:
 
@@ -607,6 +634,9 @@ Support:
 - restart after failure where appropriate.
 
 ## 6.2 Diagnostics
+
+**✅ Completed.** Diagnostics decorate explorer files and editor gutters and are
+listed in a collapsible Problems panel with F8 and mouse navigation.
 
 First major visible feature.
 
@@ -622,9 +652,14 @@ Mouse and keyboard navigation should jump directly to diagnostics.
 
 ## 6.3 Hover
 
+**✅ Completed.** Hover results appear in a centered, dismissible popup.
+
 Provide symbol/type/documentation information without obstructing normal editing.
 
 ## 6.4 Go to definition
+
+**✅ Completed.** Definitions open and focus their location; Navigation: Go Back
+restores the previous file and cursor.
 
 Support familiar code navigation.
 
@@ -632,11 +667,17 @@ Maintain navigation history so a user can return easily.
 
 ## 6.5 Completion
 
+**✅ Completed.** Completion results use a keyboard-selectable insertion popup.
+
 Add completion carefully.
 
 Typing responsiveness must always take priority.
 
 ## 6.6 Later LSP features
+
+**✅ Completed at the initial interoperable scope.** The Command Palette exposes
+references, rename with atomic UTF-16-aware workspace edits, code-action
+discovery, formatting edits, document/workspace symbols, and signature help.
 
 After the basics are reliable:
 
@@ -652,9 +693,16 @@ After the basics are reliable:
 
 TTED is genuinely comfortable for editing code in an LSP-supported language.
 
+**✅ Met when a language server is configured and installed.**
+
 ---
 
 # Phase 7 — Views, Buffers and Split Editing
+
+**Status: ✅ Complete.** A deliberately small two-pane view layer references
+shared buffer indices without duplicating file content or becoming a terminal
+window manager. Tabs remain buffer-oriented while each pane tracks its own
+active buffer.
 
 ## Goal
 
@@ -674,6 +722,9 @@ A buffer may eventually be visible in more than one view.
 
 ## 7.1 Split views
 
+**✅ Completed.** Command Palette actions split right/down, close the split, and
+focus the adjacent pane. Clicking the inactive pane also focuses it.
+
 Support:
 
 - Split Right
@@ -686,6 +737,10 @@ Mouse resizing is desirable.
 Keep layouts intentionally simple.
 
 ## 7.2 Special views
+
+**✅ Completed for current special views.** Markdown reading, Git diff/status,
+Problems, help, and reference results reuse buffers, panes, or the shared panel
+and popup primitives rather than spawning independent terminal applications.
 
 Reuse the view system where sensible for:
 
@@ -701,9 +756,15 @@ Avoid creating a separate rendering architecture for every feature.
 
 TTED supports useful editor-level splitting while remaining a good citizen inside tmux and Herdr.
 
+**✅ Met.**
+
 ---
 
 # Phase 8 — Agent-Native Core
+
+**Status: ✅ Complete.** TTED exposes permission-scoped newline-delimited
+JSON-RPC over a mode-0600 Unix socket. Requests enter the single editor event
+loop and operate on structured state, stable buffer IDs, and revisions.
 
 ## Goal
 
@@ -714,6 +775,9 @@ The critical architectural rule is:
 > **Agents interact with structured editor state, not terminal pixels or simulated keystrokes.**
 
 ## 8.1 Agent-safe editor API
+
+**✅ Completed.** Workspace, buffer, cursor, selection, diagnostics, Git, open,
+focus, single-edit, and prevalidated batch-edit operations are implemented.
 
 Expose editor operations such as:
 
@@ -744,6 +808,9 @@ Use stable identifiers and revisions where necessary so an agent cannot accident
 
 ## 8.2 One command system
 
+**✅ Completed.** `command.run` resolves stable IDs through the same `Command`
+registry and executor used by keyboard and Command Palette actions.
+
 Agent actions should use the same underlying editor command/edit systems as human UI actions wherever appropriate.
 
 Do not build two separate editors:
@@ -753,6 +820,9 @@ Do not build two separate editors:
 
 ## 8.3 Transport
 
+**✅ Completed.** The local Unix socket uses one JSON-RPC request/response per
+line, cleans itself up on shutdown, and supports `TTED_SOCKET` override.
+
 Provide a structured local interface.
 
 A Unix-domain socket with a simple structured protocol such as JSON-RPC is a reasonable starting direction, but evaluate the simplest robust solution before committing.
@@ -760,6 +830,10 @@ A Unix-domain socket with a simple structured protocol such as JSON-RPC is a rea
 The transport should allow an external agent process to interact directly with a running TTED instance.
 
 ## 8.4 Permissions
+
+**✅ Completed.** TOML capabilities independently control read, buffer/editor
+write, file creation, file deletion, and command execution. Mutations default
+off, paths remain inside the workspace, and the status bar shows an active API.
 
 Agent access must be visible and controllable.
 
@@ -780,6 +854,10 @@ Do not give an agent unrestricted capabilities merely because it connected.
 
 ## 8.5 Visible agent activity
 
+**✅ Completed at the API/core layer.** Each request records success/failure and
+method activity for the visible Phase 9 panel, while the status bar identifies
+the active API.
+
 TTED should show when an agent is:
 
 - reading;
@@ -795,9 +873,15 @@ The goal is Herdr-style visibility of agent state.
 
 An external coding agent can inspect and edit a running TTED session through a structured interface without pretending to be a human keyboard user.
 
+**✅ Met.** See `AGENT_API.md`.
+
 ---
 
 # Phase 9 — Integrated Agent Area
+
+**Status: ✅ Complete.** A collapsible, backend-neutral Agent panel provides
+prompt input, streamed responses, structured activity, clickable file activity,
+diff inspection, and accept/revert controls for revision-tracked agent edits.
 
 ## Goal
 
@@ -823,6 +907,10 @@ Agent
 
 Support:
 
+**✅ Implemented.** Human prompts are queued through `agent.next_prompt`; agents
+stream `agent.respond` and `agent.activity` events. No AI provider is built into
+the editor.
+
 - prompt input;
 - streamed agent responses;
 - visible tool/action activity;
@@ -832,6 +920,10 @@ Support:
 - approval flows where appropriate.
 
 Eventually support actions from context:
+
+**✅ Implemented through the shared Command Palette.** Ask, Explain Selection,
+Refactor Selection, Write Tests, and Review Diff enqueue structured context with
+the current file, cursor, and selection.
 
 ```text
 Ask Agent
@@ -860,9 +952,16 @@ Define an agent/backend abstraction once there is a concrete need for it.
 
 A human and an agent can productively work in the same TTED workspace while the human remains able to see and understand what the agent is doing.
 
+**✅ Met when an external backend consumes the documented panel bridge.**
+
 ---
 
 # Phase 10 — Configuration and Personalization
+
+**Status: ✅ Complete.** TTED loads optional workspace TOML with pleasant
+defaults for indentation, line numbers, wrapping, syntax theme, custom command
+keybindings, explorer filtering/limits, language servers, and agent
+capabilities. Preferences can be reloaded from the Command Palette.
 
 ## Goal
 
@@ -885,9 +984,16 @@ Consider TOML unless another format offers a clear advantage.
 
 Avoid building a plugin API yet.
 
+**✅ Met.** Configuration remains optional and introduces no plugin framework.
+
 ---
 
 # Phase 11 — Polish and Distribution
+
+**Status: ✅ Complete for v0.1.** TTED accepts directories and multiple files,
+has CLI help/version output, Cargo package metadata, a release installer,
+multi-platform release automation, CI quality gates, and the complete
+documentation set listed below.
 
 Prepare TTED to be realistically installable by other people.
 
@@ -934,6 +1040,10 @@ cargo build --release
 ```
 
 Add GitHub CI once appropriate.
+
+**✅ Complete.** GitHub Actions runs formatting, tests, Clippy with warnings
+denied, and a release build. Tagged releases package Linux x86_64/ARM64 and
+macOS x86_64/ARM64 binaries.
 
 ---
 
@@ -1031,15 +1141,6 @@ A small number of features that feel exceptionally good is more valuable than ra
 
 # Immediate Next Work
 
-Phase 1 is complete. Begin with **Phase 2 — Workspace and Explorer UX**.
-
-Recommended order:
-
-1. Replace the flattened explorer with a keyboard-navigable directory tree.
-2. Add deliberate explorer file operations with confirmations.
-3. Improve overflowing tabs and add a close affordance.
-4. Implement Focus Mode.
-5. Add Quick Open.
-6. Expand search and replacement.
-
-Do not start Git, LSP, split panes, or agent integration until the Phase 2 workspace experience is solid.
+All roadmap phases are implemented for the current v0.1 scope. Next work should
+come from hands-on testing, profiling, accessibility feedback, and narrowly
+scoped bug fixes rather than adding another broad feature phase.

@@ -1,8 +1,11 @@
 use std::{
     fs, io,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant, SystemTime},
 };
+
+static NEXT_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
 
 use ropey::Rope;
 use unicode_segmentation::UnicodeSegmentation;
@@ -37,8 +40,11 @@ struct FileStamp {
 }
 
 pub struct Buffer {
+    id: u64,
     text: Rope,
     path: Option<PathBuf>,
+    virtual_name: Option<String>,
+    read_only: bool,
     cursor: usize,
     anchor: Option<usize>,
     preferred_col: Option<usize>,
@@ -56,6 +62,13 @@ pub struct Buffer {
 impl Buffer {
     pub fn empty() -> Self {
         Self::from_text(String::new(), None, false)
+    }
+
+    pub fn read_only(name: impl Into<String>, text: String) -> Self {
+        let mut buffer = Self::from_text(text, None, false);
+        buffer.virtual_name = Some(name.into());
+        buffer.read_only = true;
+        buffer
     }
 
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
@@ -79,8 +92,11 @@ impl Buffer {
     fn from_text(text: String, path: Option<PathBuf>, crlf: bool) -> Self {
         let disk_stamp = path.as_deref().and_then(file_stamp);
         Self {
+            id: NEXT_BUFFER_ID.fetch_add(1, Ordering::Relaxed),
             text: Rope::from_str(&text),
             path,
+            virtual_name: None,
+            read_only: false,
             cursor: 0,
             anchor: None,
             preferred_col: None,
@@ -99,7 +115,13 @@ impl Buffer {
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
     }
+    pub fn id(&self) -> u64 {
+        self.id
+    }
     pub fn name(&self) -> String {
+        if let Some(name) = &self.virtual_name {
+            return name.clone();
+        }
         self.path
             .as_ref()
             .and_then(|p| p.file_name())
@@ -110,8 +132,53 @@ impl Buffer {
     pub fn is_dirty(&self) -> bool {
         self.content_id != self.saved_content_id
     }
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
     pub fn cursor(&self) -> usize {
         self.cursor
+    }
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+    pub fn apply_agent_edit(
+        &mut self,
+        expected_revision: u64,
+        start: usize,
+        end: usize,
+        text: &str,
+    ) -> Result<u64, &'static str> {
+        self.apply_agent_edits(expected_revision, &[(start, end, text.to_owned())])
+    }
+
+    pub fn apply_agent_edits(
+        &mut self,
+        expected_revision: u64,
+        edits: &[(usize, usize, String)],
+    ) -> Result<u64, &'static str> {
+        if self.read_only {
+            return Err("buffer is read-only");
+        }
+        if self.revision != expected_revision {
+            return Err("stale buffer revision");
+        }
+        if edits
+            .iter()
+            .any(|(start, end, _)| start > end || *end > self.text.len_chars())
+        {
+            return Err("invalid edit range");
+        }
+        let mut edits = edits.to_vec();
+        edits.sort_unstable_by_key(|edit| std::cmp::Reverse(edit.0));
+        self.checkpoint();
+        for (start, end, text) in edits {
+            self.text.remove(start..end);
+            self.text.insert(start, &text);
+            self.cursor = start + text.chars().count();
+        }
+        self.anchor = None;
+        self.finish_edit();
+        Ok(self.revision)
     }
     pub fn len_chars(&self) -> usize {
         self.text.len_chars()
@@ -250,6 +317,50 @@ impl Buffer {
         self.anchor = None;
         self.finish_edit();
         matches.len()
+    }
+
+    pub fn apply_text_edits(&mut self, edits: &[(usize, usize, usize, usize, String)]) {
+        if self.read_only || edits.is_empty() {
+            return;
+        }
+        let mut ranges = edits
+            .iter()
+            .map(|(start_line, start_utf16, end_line, end_utf16, text)| {
+                (
+                    self.utf16_position_to_char(*start_line, *start_utf16),
+                    self.utf16_position_to_char(*end_line, *end_utf16),
+                    text,
+                )
+            })
+            .collect::<Vec<_>>();
+        ranges.sort_unstable_by_key(|range| std::cmp::Reverse(range.0));
+        self.checkpoint();
+        for (start, end, text) in ranges {
+            if start <= end && end <= self.text.len_chars() {
+                self.text.remove(start..end);
+                self.text.insert(start, text);
+            }
+        }
+        self.cursor = self.cursor.min(self.text.len_chars());
+        self.anchor = None;
+        self.finish_edit();
+    }
+
+    fn utf16_position_to_char(&self, line: usize, utf16_column: usize) -> usize {
+        let line = line.min(self.text.len_lines().saturating_sub(1));
+        let start = self.text.line_to_char(line);
+        let content = self.text.line(line).to_string();
+        let mut units = 0;
+        let mut chars = 0;
+        for character in content.chars() {
+            let next = units + character.len_utf16();
+            if next > utf16_column {
+                break;
+            }
+            units = next;
+            chars += 1;
+        }
+        start + chars
     }
 
     fn search_ranges(&self, query: &str, case_sensitive: bool) -> Vec<(usize, usize)> {
@@ -981,5 +1092,34 @@ mod tests {
         b.undo();
         assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(b.len_lines(), 20_001);
+    }
+
+    #[test]
+    fn virtual_buffer_has_a_name_and_is_read_only() {
+        let buffer = Buffer::read_only("Workspace.diff", "diff content\n".into());
+        assert_eq!(buffer.name(), "Workspace.diff");
+        assert!(buffer.is_read_only());
+        assert!(!buffer.is_dirty());
+        assert_eq!(buffer.path(), None);
+    }
+
+    #[test]
+    fn lsp_text_edits_use_utf16_columns_and_are_atomic() {
+        let mut buffer = Buffer::from_text("a😀b\nsecond\n".into(), None, false);
+        buffer.apply_text_edits(&[(0, 1, 0, 3, "X".into()), (1, 0, 1, 6, "line".into())]);
+        assert_eq!(buffer.text(), "aXb\nline\n");
+        buffer.undo();
+        assert_eq!(buffer.text(), "a😀b\nsecond\n");
+    }
+
+    #[test]
+    fn agent_edit_rejects_stale_revisions() {
+        let mut buffer = Buffer::from_text("hello".into(), None, false);
+        assert_eq!(buffer.apply_agent_edit(0, 0, 5, "world"), Ok(1));
+        assert_eq!(
+            buffer.apply_agent_edit(0, 0, 1, "x"),
+            Err("stale buffer revision")
+        );
+        assert_eq!(buffer.text(), "world");
     }
 }

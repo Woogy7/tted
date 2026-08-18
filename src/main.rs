@@ -30,11 +30,28 @@ impl Drop for TerminalGuard {
 }
 
 fn main() -> Result<()> {
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if arguments
+        .iter()
+        .any(|argument| argument == "--help" || argument == "-h")
+    {
+        println!("TTED {}", env!("CARGO_PKG_VERSION"));
+        println!("Usage: tted [PATH ...]");
+        println!("Open files as tabs, or open a directory as the workspace.");
+        return Ok(());
+    }
+    if arguments
+        .iter()
+        .any(|argument| argument == "--version" || argument == "-V")
+    {
+        println!("tted {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let log_path = tted::diagnostics::init();
     if let Some(path) = &log_path {
         eprintln!("TTED diagnostics: {}", path.display());
     }
-    let paths = std::env::args_os().skip(1).map(PathBuf::from).collect();
+    let paths = arguments.into_iter().map(PathBuf::from).collect();
     enable_raw_mode().context("enable terminal raw mode")?;
     execute!(
         stdout(),

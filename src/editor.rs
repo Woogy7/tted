@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, VecDeque},
     fs,
     io::{self, Write},
     path::{Component, Path, PathBuf},
@@ -14,9 +15,10 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
+use serde_json::{json, Value};
 use syntect::{
     easy::HighlightLines,
     highlighting::{FontStyle, Theme},
@@ -25,10 +27,13 @@ use syntect::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use crate::agent::{AgentRequest, AgentServer};
 use crate::buffer::{Buffer, ExternalChange};
 use crate::command::{Command, CommandPalette};
+use crate::config::Config;
 use crate::explorer::{Explorer, ExplorerAction};
 use crate::git::GitService;
+use crate::lsp::{Diagnostic, LspEvent, LspService};
 use crate::quick_open::QuickOpen;
 use crate::theme;
 
@@ -59,6 +64,34 @@ struct SearchState {
     case_sensitive: bool,
 }
 
+#[derive(Clone, Copy)]
+enum LspPromptKind {
+    Rename,
+    WorkspaceSymbols,
+}
+
+struct LspPrompt {
+    kind: LspPromptKind,
+    input: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SplitDirection {
+    Right,
+    Down,
+}
+
+struct SplitState {
+    buffers: [usize; 2],
+    active: usize,
+    direction: SplitDirection,
+}
+
+struct AgentMessage {
+    text: String,
+    path: Option<PathBuf>,
+}
+
 pub struct Editor {
     buffers: Vec<Buffer>,
     active: usize,
@@ -87,6 +120,32 @@ pub struct Editor {
     delete_confirm: Option<PathBuf>,
     explorer_context_visible: bool,
     external_prompt: Option<ExternalPrompt>,
+    git_discard_confirm: Option<PathBuf>,
+    git_commit_prompt: Option<String>,
+    config: Config,
+    lsp: Option<LspService>,
+    lsp_extension: Option<String>,
+    lsp_dirty_since: Option<Instant>,
+    problems_visible: bool,
+    problems_selected: usize,
+    problems_area: Option<Rect>,
+    hover_popup: Option<String>,
+    completions: Option<Vec<String>>,
+    completion_selected: usize,
+    navigation_history: Vec<(PathBuf, usize, usize)>,
+    lsp_prompt: Option<LspPrompt>,
+    split: Option<SplitState>,
+    secondary_area: Option<Rect>,
+    agent: Option<AgentServer>,
+    agent_activity: Vec<String>,
+    agent_panel_visible: bool,
+    agent_panel_focused: bool,
+    agent_input: String,
+    agent_messages: Vec<AgentMessage>,
+    agent_prompts: VecDeque<String>,
+    agent_modified: HashMap<u64, (usize, u64)>,
+    agent_area: Option<Rect>,
+    agent_hits: Vec<(u16, PathBuf)>,
     syntaxes: SyntaxSet,
     theme: Theme,
     message: String,
@@ -95,9 +154,14 @@ pub struct Editor {
 
 impl Editor {
     pub fn new(paths: Vec<PathBuf>) -> Self {
+        let workspace_argument = paths.iter().find(|path| path.is_dir()).cloned();
+        let workspace_root = workspace_argument
+            .as_deref()
+            .and_then(|path| path.canonicalize().ok())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         let mut buffers = Vec::new();
         let mut message = String::new();
-        for path in paths {
+        for path in paths.into_iter().filter(|path| !path.is_dir()) {
             match Buffer::open(&path) {
                 Ok(buffer) => buffers.push(buffer),
                 Err(error) => message = format!("Could not open {}: {error}", path.display()),
@@ -107,11 +171,19 @@ impl Editor {
             buffers.push(Buffer::empty());
         }
         let markdown_reading = vec![false; buffers.len()];
+        let config = Config::load(&workspace_root);
         let syntaxes = SyntaxSet::load_defaults_newlines();
         let themes = syntect::highlighting::ThemeSet::load_defaults();
-        let theme = themes.themes["base16-eighties.dark"].clone();
-        let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        Self {
+        let theme = themes
+            .themes
+            .get(&config.editor.theme)
+            .or_else(|| themes.themes.get("base16-eighties.dark"))
+            .expect("bundled syntax theme")
+            .clone();
+        let agent = (!cfg!(test) && config.agent.enabled)
+            .then(|| AgentServer::start(AgentServer::default_path()).ok())
+            .flatten();
+        let mut editor = Self {
             buffers,
             active: 0,
             top_line: 0,
@@ -129,25 +201,66 @@ impl Editor {
             path_prompt: None,
             help_visible: false,
             gutter_width: 0,
-            sidebar_visible: false,
+            sidebar_visible: workspace_argument.is_some(),
             focus_mode: false,
             sidebar_before_focus: false,
             sidebar_area: None,
-            explorer: Explorer::new(workspace_root.clone()),
+            explorer: Explorer::with_options(
+                workspace_root.clone(),
+                config.explorer.show_hidden,
+                config.explorer.show_build_directories,
+                config.explorer.max_entries,
+            ),
             git: GitService::new(workspace_root),
             explorer_prompt: None,
             delete_confirm: None,
             explorer_context_visible: false,
             external_prompt: None,
+            git_discard_confirm: None,
+            git_commit_prompt: None,
+            config,
+            lsp: None,
+            lsp_extension: None,
+            lsp_dirty_since: None,
+            problems_visible: false,
+            problems_selected: 0,
+            problems_area: None,
+            hover_popup: None,
+            completions: None,
+            completion_selected: 0,
+            navigation_history: Vec::new(),
+            lsp_prompt: None,
+            split: None,
+            secondary_area: None,
+            agent,
+            agent_activity: Vec::new(),
+            agent_panel_visible: false,
+            agent_panel_focused: false,
+            agent_input: String::new(),
+            agent_messages: Vec::new(),
+            agent_prompts: VecDeque::new(),
+            agent_modified: HashMap::new(),
+            agent_area: None,
+            agent_hits: Vec::new(),
             syntaxes,
             theme,
             message,
             quit_armed: false,
-        }
+        };
+        editor.activate_lsp_for_current();
+        editor
     }
 
     fn current(&self) -> &Buffer {
         &self.buffers[self.active]
+    }
+
+    fn indentation_unit(&self) -> String {
+        if self.config.editor.use_spaces {
+            " ".repeat(self.config.editor.tab_width.max(1))
+        } else {
+            "\t".into()
+        }
     }
     fn current_mut(&mut self) -> &mut Buffer {
         &mut self.buffers[self.active]
@@ -170,6 +283,22 @@ impl Editor {
                 last_disk_check = Instant::now();
             }
             redraw |= self.git.tick();
+            if let Some(message) = self.git.take_operation_message() {
+                self.message = message;
+                self.explorer.refresh();
+                redraw = true;
+            }
+            if self
+                .lsp_dirty_since
+                .is_some_and(|started| started.elapsed() >= Duration::from_millis(150))
+            {
+                self.sync_lsp_change();
+            }
+            redraw |= self.poll_lsp();
+            while let Some(request) = self.agent.as_ref().and_then(AgentServer::try_recv) {
+                self.handle_agent_request(request);
+                redraw = true;
+            }
             if redraw {
                 terminal.draw(|frame| self.render(frame))?;
             }
@@ -188,8 +317,16 @@ impl Editor {
                     || self.external_prompt.is_some()
                     || self.delete_confirm.is_some()
                     || self.close_armed.is_some()
+                    || self.git_discard_confirm.is_some()
                 {
                     return Ok(false);
+                } else if let Some(message) = &mut self.git_commit_prompt {
+                    message.push_str(text.trim_end_matches(['\r', '\n']));
+                } else if self.agent_panel_focused {
+                    self.agent_input
+                        .push_str(text.trim_end_matches(['\r', '\n']));
+                } else if let Some(prompt) = &mut self.lsp_prompt {
+                    prompt.input.push_str(text.trim_end_matches(['\r', '\n']));
                 } else if let Some(path) = &mut self.path_prompt {
                     path.push_str(text.trim_end_matches(['\r', '\n']));
                 } else if let Some(search) = &mut self.search {
@@ -206,6 +343,8 @@ impl Editor {
                     palette.push_str(text.trim_end_matches(['\r', '\n']));
                 } else if let Some(prompt) = &mut self.explorer_prompt {
                     prompt.input.push_str(text.trim_end_matches(['\r', '\n']));
+                } else if self.current().is_read_only() {
+                    self.message = "Git views are read-only".into();
                 } else {
                     self.current_mut().insert(&text.replace("\r\n", "\n"));
                     self.changed();
@@ -214,6 +353,9 @@ impl Editor {
             Event::Mouse(_)
                 if self.help_visible
                     || self.external_prompt.is_some()
+                    || self.git_discard_confirm.is_some()
+                    || self.git_commit_prompt.is_some()
+                    || self.lsp_prompt.is_some()
                     || self.explorer_prompt.is_some()
                     || self.delete_confirm.is_some()
                     || self.close_armed.is_some()
@@ -222,6 +364,54 @@ impl Editor {
                     || self.command_palette.is_some()
                     || self.explorer_context_visible => {}
             Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left)
+                    if self
+                        .agent_area
+                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into())) =>
+                {
+                    let area = self.agent_area.expect("Agent area checked");
+                    if mouse.row == area.bottom().saturating_sub(1) {
+                        let relative = mouse.column.saturating_sub(area.x);
+                        if relative < 13 {
+                            let text = self.git.snapshot().workspace_diff();
+                            self.open_read_only("Agent Changes.diff", text);
+                        } else if relative < 22 {
+                            self.accept_agent_changes();
+                        } else {
+                            self.revert_agent_changes();
+                        }
+                    } else if mouse.row >= area.bottom().saturating_sub(4) {
+                        self.agent_panel_focused = true;
+                    } else if let Some((_, path)) = self
+                        .agent_hits
+                        .iter()
+                        .find(|(row, _)| *row == mouse.row)
+                        .cloned()
+                    {
+                        self.open_path(path);
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Left)
+                    if self
+                        .secondary_area
+                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into())) =>
+                {
+                    self.focus_next_split();
+                }
+                MouseEventKind::Down(MouseButton::Left)
+                    if self
+                        .problems_area
+                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into())) =>
+                {
+                    let area = self.problems_area.expect("Problems area checked");
+                    if mouse.row > area.y && mouse.row < area.bottom().saturating_sub(1) {
+                        let visible = usize::from(area.height.saturating_sub(2));
+                        let start = self
+                            .problems_selected
+                            .saturating_sub(visible.saturating_sub(1));
+                        self.open_problem(start + usize::from(mouse.row - area.y - 1));
+                    }
+                }
                 MouseEventKind::Down(MouseButton::Right)
                     if self
                         .sidebar_area
@@ -340,6 +530,45 @@ impl Editor {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        if self.agent_panel_focused && !(ctrl && key.code == KeyCode::Char('q')) {
+            return self.agent_panel_key(key);
+        }
+        if self.hover_popup.is_some() {
+            self.hover_popup = None;
+            return Ok(false);
+        }
+        if self.completions.is_some() {
+            match key.code {
+                KeyCode::Esc => self.completions = None,
+                KeyCode::Up => {
+                    self.completion_selected = self.completion_selected.saturating_sub(1)
+                }
+                KeyCode::Down => {
+                    let max = self
+                        .completions
+                        .as_ref()
+                        .map_or(0, |items| items.len().saturating_sub(1));
+                    self.completion_selected = (self.completion_selected + 1).min(max);
+                }
+                KeyCode::Enter => {
+                    let selected = self
+                        .completions
+                        .as_ref()
+                        .and_then(|items| items.get(self.completion_selected))
+                        .cloned();
+                    self.completions = None;
+                    if let Some(text) = selected {
+                        self.current_mut().insert_typed(&text);
+                        self.changed();
+                    }
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
+        if self.lsp_prompt.is_some() {
+            return self.lsp_prompt_key(key);
+        }
         if self.help_visible {
             if matches!(key.code, KeyCode::Esc | KeyCode::F(1)) {
                 self.help_visible = false;
@@ -349,8 +578,18 @@ impl Editor {
         if key.code == KeyCode::F(1) {
             return self.execute_command(Command::ShowHelp);
         }
+        if key.code == KeyCode::F(8) {
+            self.problems_visible = true;
+            return self.jump_to_problem(1);
+        }
         if self.external_prompt.is_some() {
             return self.external_prompt_key(key);
+        }
+        if self.git_discard_confirm.is_some() {
+            return self.git_discard_key(key);
+        }
+        if self.git_commit_prompt.is_some() {
+            return self.git_commit_key(key);
         }
         if self.close_armed.is_some() {
             return self.close_confirm_key(key);
@@ -375,6 +614,14 @@ impl Editor {
         }
         if self.command_palette.is_some() {
             return self.command_palette_key(key);
+        }
+        if let Some(command) = self
+            .config
+            .keybindings
+            .get(&key_event_name(&key))
+            .and_then(|id| Command::from_id(id))
+        {
+            return self.execute_command(command);
         }
         if ctrl && shift && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P')) {
             self.command_palette = Some(CommandPalette::new());
@@ -440,6 +687,13 @@ impl Editor {
                 }
                 _ => {}
             }
+            return Ok(false);
+        }
+        if self.current().is_read_only()
+            && ctrl
+            && matches!(key.code, KeyCode::Char('s' | 'x' | 'v' | 'z' | 'y'))
+        {
+            self.message = "Git views are read-only".into();
             return Ok(false);
         }
         if ctrl {
@@ -530,6 +784,20 @@ impl Editor {
             }
             return Ok(false);
         }
+        if self.current().is_read_only()
+            && matches!(
+                key.code,
+                KeyCode::Char(_)
+                    | KeyCode::Enter
+                    | KeyCode::Tab
+                    | KeyCode::BackTab
+                    | KeyCode::Backspace
+                    | KeyCode::Delete
+            )
+        {
+            self.message = "Git views are read-only".into();
+            return Ok(false);
+        }
         match key.code {
             KeyCode::Char(c) => {
                 if matches!(c, '}' | ']' | ')')
@@ -539,7 +807,8 @@ impl Editor {
                         .chars()
                         .all(char::is_whitespace)
                 {
-                    self.current_mut().unindent_current_line(4);
+                    let width = self.config.editor.tab_width.max(1);
+                    self.current_mut().unindent_current_line(width);
                 }
                 self.current_mut().insert_typed(&c.to_string());
                 self.changed();
@@ -560,7 +829,7 @@ impl Editor {
                     .char_at_cursor()
                     .is_some_and(|ch| matches!(ch, '}' | ']' | ')'));
                 let inner = if opener {
-                    format!("{indent}    ")
+                    format!("{indent}{}", self.indentation_unit())
                 } else {
                     indent.clone()
                 };
@@ -576,17 +845,24 @@ impl Editor {
                 self.changed();
             }
             KeyCode::Tab => {
-                let col = self.current().cursor_screen_col();
-                let spaces = 4 - (col % 4);
-                self.current_mut().insert(&" ".repeat(spaces));
+                let width = self.config.editor.tab_width.max(1);
+                let insertion = if self.config.editor.use_spaces {
+                    let col = self.current().cursor_screen_col();
+                    " ".repeat(width - (col % width))
+                } else {
+                    "\t".into()
+                };
+                self.current_mut().insert(&insertion);
                 self.changed();
             }
             KeyCode::BackTab => {
-                self.current_mut().unindent_current_line(4);
+                let width = self.config.editor.tab_width.max(1);
+                self.current_mut().unindent_current_line(width);
                 self.changed();
             }
             KeyCode::Backspace => {
-                self.current_mut().smart_backspace(4);
+                let width = self.config.editor.tab_width.max(1);
+                self.current_mut().smart_backspace(width);
                 self.changed();
             }
             KeyCode::Delete => {
@@ -805,7 +1081,9 @@ impl Editor {
                 });
             }
             Command::Save | Command::SaveAs => {
-                if command == Command::SaveAs || self.current().path().is_none() {
+                if self.current().is_read_only() {
+                    self.message = "Git views are read-only".into();
+                } else if command == Command::SaveAs || self.current().path().is_none() {
                     self.path_prompt = Some(
                         self.current()
                             .path()
@@ -819,6 +1097,9 @@ impl Editor {
                             self.explorer.refresh();
                             self.git.request_refresh();
                             self.message = "Saved".into();
+                            if let (Some(lsp), Some(path)) = (&self.lsp, self.current().path()) {
+                                lsp.save(path.to_path_buf());
+                            }
                         }
                         Err(error) => self.message = format!("Save failed: {error}"),
                     }
@@ -847,7 +1128,9 @@ impl Editor {
             }
             Command::FocusMode => self.toggle_focus_mode(),
             Command::FindReplace => {
-                if self.markdown_reading[self.active] {
+                if self.current().is_read_only() {
+                    self.message = "Find and Replace is unavailable in read-only Git views".into();
+                } else if self.markdown_reading[self.active] {
                     self.message = "Return to Markdown source before searching".into();
                 } else {
                     self.search = Some(SearchState {
@@ -867,6 +1150,7 @@ impl Editor {
                         self.active = (self.active + self.buffers.len() - 1) % self.buffers.len();
                     }
                     self.reset_view();
+                    self.activate_lsp_for_current();
                 }
             }
             Command::ToggleMarkdownReader => {
@@ -889,6 +1173,132 @@ impl Editor {
                 } else {
                     self.message = "Markdown reading view is available for .md files".into();
                 }
+            }
+            Command::GitStatus => {
+                let text = self.git.snapshot().status_text();
+                self.open_read_only("Git Status", text);
+            }
+            Command::GitCurrentFileDiff => {
+                let Some(path) = self.current().path().map(PathBuf::from) else {
+                    self.message = "Open a saved file before requesting its Git diff".into();
+                    return Ok(false);
+                };
+                let text = self.git.snapshot().file_diff(&path);
+                self.open_read_only("Current File.diff", text);
+            }
+            Command::GitWorkspaceDiff => {
+                let text = self.git.snapshot().workspace_diff();
+                self.open_read_only("Workspace.diff", text);
+            }
+            Command::GitStageCurrentFile => self.start_git_file_operation("stage"),
+            Command::GitUnstageCurrentFile => self.start_git_file_operation("unstage"),
+            Command::GitDiscardCurrentFile => {
+                if self.current().is_dirty() {
+                    self.message = "Save or discard editor changes before Git discard".into();
+                } else if let Some(path) = self.current().path().map(PathBuf::from) {
+                    if self.git.snapshot().decoration(&path) == Some('?') {
+                        self.message = "Git discard does not delete untracked files".into();
+                    } else {
+                        self.git_discard_confirm = Some(path);
+                    }
+                } else {
+                    self.message = "Open a saved repository file first".into();
+                }
+            }
+            Command::GitCommit => {
+                self.git_commit_prompt = Some(String::new());
+                self.message.clear();
+            }
+            Command::ToggleProblems => self.problems_visible = !self.problems_visible,
+            Command::LspHover => self.request_lsp("hover"),
+            Command::LspDefinition => self.request_lsp("definition"),
+            Command::LspCompletion => self.request_lsp("completion"),
+            Command::LspBack => {
+                if let Some((path, line, column)) = self.navigation_history.pop() {
+                    self.open_path(path);
+                    self.current_mut().set_cursor_line_col(line, column, false);
+                    self.ensure_visible();
+                } else {
+                    self.message = "Navigation history is empty".into();
+                }
+            }
+            Command::LspReferences => self.request_lsp("references"),
+            Command::LspRename => {
+                self.lsp_prompt = Some(LspPrompt {
+                    kind: LspPromptKind::Rename,
+                    input: String::new(),
+                })
+            }
+            Command::LspCodeActions => self.request_lsp("code actions"),
+            Command::LspFormat => self.request_lsp("format"),
+            Command::LspDocumentSymbols => self.request_lsp("document symbols"),
+            Command::LspWorkspaceSymbols => {
+                self.lsp_prompt = Some(LspPrompt {
+                    kind: LspPromptKind::WorkspaceSymbols,
+                    input: String::new(),
+                })
+            }
+            Command::LspSignature => self.request_lsp("signature"),
+            Command::LspRestart => {
+                self.lsp = None;
+                self.lsp_extension = None;
+                self.activate_lsp_for_current();
+            }
+            Command::SplitRight => self.create_split(SplitDirection::Right),
+            Command::SplitDown => self.create_split(SplitDirection::Down),
+            Command::CloseSplit => {
+                if self.split.take().is_some() {
+                    self.message = "Split closed".into();
+                } else {
+                    self.message = "No split is open".into();
+                }
+            }
+            Command::FocusNextSplit => self.focus_next_split(),
+            Command::ToggleAgentPanel => {
+                self.agent_panel_visible = !self.agent_panel_visible;
+                self.agent_panel_focused = self.agent_panel_visible;
+            }
+            Command::AgentViewDiff => {
+                let text = self.git.snapshot().workspace_diff();
+                self.open_read_only("Agent Changes.diff", text);
+            }
+            Command::AgentAccept => self.accept_agent_changes(),
+            Command::AgentRevert => self.revert_agent_changes(),
+            Command::AgentAsk => {
+                self.agent_panel_visible = true;
+                self.agent_panel_focused = true;
+            }
+            Command::AgentExplainSelection => self.enqueue_context_prompt("Explain this selection"),
+            Command::AgentRefactorSelection => {
+                self.enqueue_context_prompt("Refactor this selection")
+            }
+            Command::AgentWriteTests => {
+                self.enqueue_context_prompt("Write tests for the current context")
+            }
+            Command::AgentReviewDiff => {
+                self.enqueue_agent_prompt("Review the current Git diff".into())
+            }
+            Command::ReloadConfig => {
+                let root = self.explorer.root().to_path_buf();
+                self.config = Config::load(&root);
+                self.explorer = Explorer::with_options(
+                    root,
+                    self.config.explorer.show_hidden,
+                    self.config.explorer.show_build_directories,
+                    self.config.explorer.max_entries,
+                );
+                let themes = syntect::highlighting::ThemeSet::load_defaults();
+                if let Some(theme) = themes
+                    .themes
+                    .get(&self.config.editor.theme)
+                    .or_else(|| themes.themes.get("base16-eighties.dark"))
+                {
+                    self.theme = theme.clone();
+                }
+                self.lsp = None;
+                self.lsp_extension = None;
+                self.activate_lsp_for_current();
+                self.message = "Configuration reloaded".into();
             }
             Command::ShowHelp => self.help_visible = true,
             Command::Quit => {
@@ -928,6 +1338,81 @@ impl Editor {
             base,
             source,
         });
+    }
+
+    fn start_git_file_operation(&mut self, operation: &str) {
+        if self.current().is_dirty() {
+            self.message = "Save the current file before changing its Git state".into();
+            return;
+        }
+        let Some(path) = self.current().path().map(PathBuf::from) else {
+            self.message = "Open a saved repository file first".into();
+            return;
+        };
+        let started = match operation {
+            "stage" => self.git.stage(&path),
+            "unstage" => self.git.unstage(&path),
+            _ => false,
+        };
+        self.message = if started {
+            format!("Git {operation} started…")
+        } else {
+            "Git operation unavailable or already running".into()
+        };
+    }
+
+    fn git_discard_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Char('y' | 'Y') => {
+                let path = self.git_discard_confirm.take().expect("Git discard path");
+                self.message = if self.git.discard(&path) {
+                    "Git discard started…".into()
+                } else {
+                    "Git discard unavailable or another operation is running".into()
+                };
+            }
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                self.git_discard_confirm = None;
+                self.message = "Git discard cancelled".into();
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn git_commit_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Esc => {
+                self.git_commit_prompt = None;
+                self.message = "Git commit cancelled".into();
+            }
+            KeyCode::Backspace => {
+                self.git_commit_prompt
+                    .as_mut()
+                    .expect("commit prompt")
+                    .pop();
+            }
+            KeyCode::Enter => {
+                let message = self.git_commit_prompt.take().unwrap_or_default();
+                if message.trim().is_empty() {
+                    self.message = "Commit message cannot be empty".into();
+                    self.git_commit_prompt = Some(message);
+                } else {
+                    self.message = if self.git.commit(message) {
+                        "Git commit started…".into()
+                    } else {
+                        "Git commit unavailable or another operation is running".into()
+                    };
+                }
+            }
+            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => self
+                .git_commit_prompt
+                .as_mut()
+                .expect("commit prompt")
+                .push(character),
+            _ => {}
+        }
+        Ok(false)
     }
 
     fn explorer_context_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -1164,6 +1649,7 @@ impl Editor {
     }
 
     fn close_current_tab(&mut self) {
+        self.split = None;
         self.buffers.remove(self.active);
         self.markdown_reading.remove(self.active);
         if self.buffers.is_empty() {
@@ -1245,7 +1731,9 @@ impl Editor {
                 .is_some_and(|open| same_path(open, path.as_path()))
         }) {
             self.active = index;
+            self.update_active_split_buffer();
             self.reset_view();
+            self.activate_lsp_for_current();
             return;
         }
         match Buffer::open(&path) {
@@ -1253,11 +1741,159 @@ impl Editor {
                 self.buffers.push(buffer);
                 self.markdown_reading.push(false);
                 self.active = self.buffers.len() - 1;
+                self.update_active_split_buffer();
                 self.message = format!("Opened {}", path.display());
                 self.reset_view();
+                self.activate_lsp_for_current();
             }
             Err(error) => self.message = format!("Could not open {}: {error}", path.display()),
         }
+    }
+
+    fn create_split(&mut self, direction: SplitDirection) {
+        self.split = Some(SplitState {
+            buffers: [self.active, self.active],
+            active: 0,
+            direction,
+        });
+        self.message = if direction == SplitDirection::Right {
+            "Split right"
+        } else {
+            "Split down"
+        }
+        .into();
+    }
+
+    fn focus_next_split(&mut self) {
+        let Some(split) = &mut self.split else {
+            self.message = "No split is open".into();
+            return;
+        };
+        split.buffers[split.active] = self.active;
+        split.active = 1 - split.active;
+        let pane = split.active;
+        let buffer = split.buffers[pane];
+        self.active = buffer.min(self.buffers.len().saturating_sub(1));
+        self.reset_view();
+        self.activate_lsp_for_current();
+        self.message = format!("Focused split {}", pane + 1);
+    }
+
+    fn update_active_split_buffer(&mut self) {
+        if let Some(split) = &mut self.split {
+            split.buffers[split.active] = self.active;
+        }
+    }
+
+    fn request_lsp(&mut self, request: &str) {
+        let Some(path) = self.current().path().map(PathBuf::from) else {
+            self.message = "LSP actions require a saved file".into();
+            return;
+        };
+        let (line, column) = self.current().cursor_line_col();
+        let Some(lsp) = &self.lsp else {
+            self.message = "No language server configured for this file".into();
+            return;
+        };
+        match request {
+            "hover" => lsp.hover(path, line, column),
+            "definition" => lsp.definition(path, line, column),
+            "completion" => lsp.completion(path, line, column),
+            "references" => lsp.references(path, line, column),
+            "code actions" => lsp.code_actions(path, line, column),
+            "format" => lsp.formatting(path),
+            "document symbols" => lsp.document_symbols(path),
+            "signature" => lsp.signature(path, line, column),
+            _ => return,
+        }
+        self.message = format!("LSP {request} requested…");
+    }
+
+    fn lsp_prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Esc => {
+                self.lsp_prompt = None;
+                self.message = "Language action cancelled".into();
+            }
+            KeyCode::Backspace => {
+                self.lsp_prompt.as_mut().expect("LSP prompt").input.pop();
+            }
+            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => self
+                .lsp_prompt
+                .as_mut()
+                .expect("LSP prompt")
+                .input
+                .push(character),
+            KeyCode::Enter => {
+                let prompt = self.lsp_prompt.take().expect("LSP prompt");
+                if prompt.input.trim().is_empty() {
+                    self.message = "A non-empty value is required".into();
+                    self.lsp_prompt = Some(prompt);
+                    return Ok(false);
+                }
+                let Some(lsp) = &self.lsp else {
+                    self.message = "No language server configured".into();
+                    return Ok(false);
+                };
+                match prompt.kind {
+                    LspPromptKind::Rename => {
+                        let Some(path) = self.current().path().map(PathBuf::from) else {
+                            return Ok(false);
+                        };
+                        let (line, column) = self.current().cursor_line_col();
+                        lsp.rename(path, line, column, prompt.input);
+                    }
+                    LspPromptKind::WorkspaceSymbols => lsp.workspace_symbols(prompt.input),
+                }
+                self.message = "Language request started…".into();
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn jump_to_problem(&mut self, delta: isize) -> Result<bool> {
+        let items = self.current_diagnostics();
+        if items.is_empty() {
+            self.message = "No diagnostics".into();
+            return Ok(false);
+        }
+        self.problems_selected = self
+            .problems_selected
+            .saturating_add_signed(delta)
+            .min(items.len() - 1);
+        self.open_problem(self.problems_selected);
+        Ok(false)
+    }
+
+    fn open_problem(&mut self, index: usize) {
+        let items = self.current_diagnostics();
+        let Some(item) = items.get(index).cloned() else {
+            return;
+        };
+        self.problems_selected = index;
+        self.open_path(item.path);
+        self.current_mut()
+            .set_cursor_line_col(item.line, item.column, false);
+        self.ensure_visible();
+        self.message = item.message;
+    }
+
+    fn open_read_only(&mut self, name: &str, text: String) {
+        if let Some(index) = self
+            .buffers
+            .iter()
+            .position(|buffer| buffer.is_read_only() && buffer.name() == name)
+        {
+            self.buffers[index] = Buffer::read_only(name, text);
+            self.active = index;
+        } else {
+            self.buffers.push(Buffer::read_only(name, text));
+            self.markdown_reading.push(false);
+            self.active = self.buffers.len() - 1;
+        }
+        self.message = format!("Opened {name} (read-only)");
+        self.reset_view();
     }
 
     fn copy_to_terminal_clipboard(&self, text: &str) -> Result<()> {
@@ -1269,7 +1905,386 @@ impl Editor {
 
     fn changed(&mut self) {
         self.quit_armed = false;
+        self.lsp_dirty_since.get_or_insert_with(Instant::now);
         self.ensure_visible();
+    }
+
+    fn activate_lsp_for_current(&mut self) {
+        let Some(path) = self.current().path().map(PathBuf::from) else {
+            return;
+        };
+        let Some(extension) = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        if self.lsp_extension.as_deref() == Some(&extension) {
+            return;
+        }
+        self.lsp = None;
+        self.lsp_extension = None;
+        let Some(server) = self.config.language_server(&path).cloned() else {
+            return;
+        };
+        match LspService::start(self.explorer.root().to_path_buf(), server) {
+            Ok(service) => {
+                self.lsp = Some(service);
+                self.lsp_extension = Some(extension);
+                self.message = "Language server starting…".into();
+            }
+            Err(error) => self.message = format!("Could not start language service: {error}"),
+        }
+    }
+
+    fn sync_lsp_change(&mut self) {
+        self.lsp_dirty_since = None;
+        let Some(path) = self.current().path().map(PathBuf::from) else {
+            return;
+        };
+        let text = self.current().text();
+        let version = self.current().revision() as i64 + 1;
+        if let Some(lsp) = &self.lsp {
+            lsp.change(path, version, text);
+        }
+    }
+
+    fn poll_lsp(&mut self) -> bool {
+        let events = self.lsp.as_mut().map(LspService::poll).unwrap_or_default();
+        let changed = !events.is_empty();
+        for event in events {
+            match event {
+                LspEvent::Ready => {
+                    if let Some(path) = self.current().path().map(PathBuf::from) {
+                        let text = self.current().text();
+                        if let Some(lsp) = &self.lsp {
+                            lsp.open(path, text);
+                        }
+                    }
+                    self.message = "Language server ready".into();
+                }
+                LspEvent::Diagnostics { .. } => {
+                    let count = self.lsp.as_ref().map_or(0, |lsp| lsp.diagnostics().count());
+                    self.problems_selected = self.problems_selected.min(count.saturating_sub(1));
+                }
+                LspEvent::Hover(text) => {
+                    self.hover_popup = Some(if text.is_empty() {
+                        "No hover information".into()
+                    } else {
+                        text
+                    });
+                }
+                LspEvent::Definition { path, line, column } => {
+                    if let Some(current) = self.current().path().map(PathBuf::from) {
+                        let (current_line, current_column) = self.current().cursor_line_col();
+                        self.navigation_history
+                            .push((current, current_line, current_column));
+                    }
+                    self.open_path(path);
+                    self.current_mut().set_cursor_line_col(line, column, false);
+                    self.ensure_visible();
+                }
+                LspEvent::Completions(items) => {
+                    self.completion_selected = 0;
+                    self.completions = Some(items);
+                }
+                LspEvent::Locations(locations) => {
+                    let text = if locations.is_empty() {
+                        "No references found.\n".into()
+                    } else {
+                        locations
+                            .iter()
+                            .map(|(path, line, column)| {
+                                format!("{}:{}:{}\n", path.display(), line + 1, column + 1)
+                            })
+                            .collect()
+                    };
+                    self.open_read_only("References", text);
+                }
+                LspEvent::WorkspaceEdits(changes) => {
+                    let mut files = 0;
+                    for (path, edits) in changes {
+                        self.open_path(path);
+                        self.current_mut().apply_text_edits(&edits);
+                        files += 1;
+                    }
+                    if files > 0 {
+                        self.changed();
+                    }
+                    self.message = format!("Applied language-server edits to {files} file(s)");
+                }
+                LspEvent::Information(text) => self.hover_popup = Some(text),
+            }
+        }
+        changed
+    }
+
+    fn current_diagnostics(&self) -> Vec<Diagnostic> {
+        self.lsp
+            .as_ref()
+            .map(LspService::all_diagnostics)
+            .unwrap_or_default()
+    }
+
+    fn handle_agent_request(&mut self, request: AgentRequest) {
+        let method = request.method.clone();
+        let params = request.params.clone();
+        let is_write = matches!(
+            method.as_str(),
+            "edit.apply" | "edit.apply_batch" | "editor.open" | "editor.focus_range"
+        );
+        let allowed = if method == "file.create" {
+            self.config.agent.allow_file_create
+        } else if method == "file.delete" {
+            self.config.agent.allow_file_delete
+        } else if method == "command.run" {
+            self.config.agent.allow_commands
+        } else if is_write {
+            self.config.agent.allow_write
+        } else {
+            self.config.agent.allow_read
+        };
+        let result = if !allowed {
+            Err(format!("permission denied for {method}"))
+        } else {
+            self.execute_agent_method(&method, &params)
+        };
+        self.agent_activity.push(format!(
+            "{} {}",
+            if result.is_ok() { "✓" } else { "!" },
+            method
+        ));
+        if self.agent_activity.len() > 100 {
+            self.agent_activity.remove(0);
+        }
+        self.message = format!("Agent: {method}");
+        request.reply(result);
+    }
+
+    fn execute_agent_method(&mut self, method: &str, params: &Value) -> Result<Value, String> {
+        match method {
+            "workspace.info" => Ok(json!({"root":self.explorer.root(),"socket":self.agent.as_ref().map(|agent|agent.path()),"buffers":self.buffers.len()})),
+            "workspace.files" => Ok(json!(collect_workspace_files(self.explorer.root(), 20_000))),
+            "buffer.list" => Ok(Value::Array(self.buffers.iter().map(|buffer| json!({"id":buffer.id(),"path":buffer.path(),"name":buffer.name(),"revision":buffer.revision(),"dirty":buffer.is_dirty(),"read_only":buffer.is_read_only()})).collect())),
+            "buffer.read" => { let buffer=self.agent_buffer(params)?; Ok(json!({"id":buffer.id(),"revision":buffer.revision(),"text":buffer.text()})) }
+            "buffer.revision" => { let buffer=self.agent_buffer(params)?; Ok(json!({"id":buffer.id(),"revision":buffer.revision()})) }
+            "editor.current_file" => Ok(json!({"buffer_id":self.current().id(),"path":self.current().path(),"revision":self.current().revision()})),
+            "editor.cursor" => { let (line,column)=self.current().cursor_line_col(); Ok(json!({"line":line,"column":column,"char_offset":self.current().cursor()})) }
+            "editor.selection" => Ok(json!({"range":self.current().selection(),"text":self.current().selected_text()})),
+            "editor.open" => { let path=self.safe_agent_path(params)?; self.open_path(path); Ok(json!({"buffer_id":self.current().id()})) }
+            "editor.focus_range" => { let id=required_u64(params,"buffer_id")?; let line=required_u64(params,"line")? as usize; let column=required_u64(params,"column")? as usize; let index=self.buffers.iter().position(|buffer|buffer.id()==id).ok_or("unknown buffer")?; self.active=index; self.update_active_split_buffer(); self.current_mut().set_cursor_line_col(line,column,false); self.ensure_visible(); Ok(json!({"focused":true})) }
+            "edit.apply" => { let id=required_u64(params,"buffer_id")?; let revision=required_u64(params,"revision")?; let start=required_u64(params,"start")? as usize; let end=required_u64(params,"end")? as usize; let text=params.get("text").and_then(Value::as_str).ok_or("missing text")?; let buffer=self.buffers.iter_mut().find(|buffer|buffer.id()==id).ok_or("unknown buffer")?; let revision=buffer.apply_agent_edit(revision,start,end,text).map_err(str::to_owned)?; let tracked=self.agent_modified.entry(id).or_insert((0,revision)); tracked.0+=1; tracked.1=revision; self.changed(); Ok(json!({"revision":revision})) }
+            "diagnostics.list" => Ok(json!(self.current_diagnostics().iter().map(|item|json!({"path":item.path,"line":item.line,"column":item.column,"severity":item.severity,"message":item.message})).collect::<Vec<_>>())),
+            "git.status" => Ok(json!({"text":self.git.snapshot().status_text()})),
+            "git.diff" => Ok(json!({"text":self.git.snapshot().workspace_diff()})),
+            "agent.next_prompt" => Ok(json!({"prompt":self.agent_prompts.pop_front()})),
+            "agent.respond" => { let text=params.get("text").and_then(Value::as_str).ok_or("missing text")?.to_owned(); let append=params.get("append").and_then(Value::as_bool).unwrap_or(false); if append { if let Some(last)=self.agent_messages.last_mut() { last.text.push_str(&text); } else { self.agent_messages.push(AgentMessage{text,path:None}); } } else { self.agent_messages.push(AgentMessage{text,path:None}); } self.agent_panel_visible=true; Ok(json!({"received":true})) }
+            "agent.activity" => { let text=params.get("text").and_then(Value::as_str).ok_or("missing text")?.to_owned(); let path=params.get("path").and_then(Value::as_str).map(|path|self.explorer.root().join(path)); self.agent_messages.push(AgentMessage{text,path}); self.agent_panel_visible=true; Ok(json!({"received":true})) }
+            "command.run" => { let id=params.get("id").and_then(Value::as_str).ok_or("missing command id")?; let command=Command::from_id(id).ok_or("unknown command")?; self.execute_command(command).map_err(|error|error.to_string())?; Ok(json!({"executed":id})) }
+            "file.create" => { let path=self.safe_agent_new_path(params)?; fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|error|error.to_string())?; self.explorer.refresh(); Ok(json!({"path":path})) }
+            "file.delete" => { let path=self.safe_agent_path(params)?; if self.path_is_open(&path) { return Err("close the file before deleting it".into()); } if path.is_dir() { fs::remove_dir(&path) } else { fs::remove_file(&path) }.map_err(|error|error.to_string())?; self.explorer.refresh(); Ok(json!({"deleted":path})) }
+            "edit.apply_batch" => self.apply_agent_batch(params),
+            _ => Err("method not found".into()),
+        }
+    }
+
+    fn agent_buffer(&self, params: &Value) -> Result<&Buffer, String> {
+        let id = required_u64(params, "buffer_id")?;
+        self.buffers
+            .iter()
+            .find(|buffer| buffer.id() == id)
+            .ok_or_else(|| "unknown buffer".into())
+    }
+    fn safe_agent_path(&self, params: &Value) -> Result<PathBuf, String> {
+        let raw = params
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or("missing path")?;
+        let path = self
+            .explorer
+            .root()
+            .join(raw)
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let root = self
+            .explorer
+            .root()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        path.starts_with(&root)
+            .then_some(path)
+            .ok_or_else(|| "path escapes workspace".into())
+    }
+    fn safe_agent_new_path(&self, params: &Value) -> Result<PathBuf, String> {
+        let raw = params
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or("missing path")?;
+        let path = self.explorer.root().join(raw);
+        let parent = path
+            .parent()
+            .ok_or("invalid path")?
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let root = self
+            .explorer
+            .root()
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        parent
+            .starts_with(&root)
+            .then_some(path)
+            .ok_or_else(|| "path escapes workspace".into())
+    }
+
+    fn apply_agent_batch(&mut self, params: &Value) -> Result<Value, String> {
+        let edits = params
+            .get("edits")
+            .and_then(Value::as_array)
+            .ok_or("missing edits")?;
+        let mut grouped = HashMap::<u64, (u64, Vec<(usize, usize, String)>)>::new();
+        for edit in edits {
+            let id = required_u64(edit, "buffer_id")?;
+            let revision = required_u64(edit, "revision")?;
+            let start = required_u64(edit, "start")? as usize;
+            let end = required_u64(edit, "end")? as usize;
+            let text = edit
+                .get("text")
+                .and_then(Value::as_str)
+                .ok_or("missing text")?
+                .to_owned();
+            let entry = grouped.entry(id).or_insert_with(|| (revision, Vec::new()));
+            if entry.0 != revision {
+                return Err("batch contains conflicting revisions".into());
+            }
+            entry.1.push((start, end, text));
+        }
+        for (id, (revision, edits)) in &grouped {
+            let buffer = self
+                .buffers
+                .iter()
+                .find(|buffer| buffer.id() == *id)
+                .ok_or("unknown buffer")?;
+            if buffer.revision() != *revision {
+                return Err("stale buffer revision".into());
+            }
+            if buffer.is_read_only() {
+                return Err("buffer is read-only".into());
+            }
+            if edits
+                .iter()
+                .any(|(start, end, _)| start > end || *end > buffer.len_chars())
+            {
+                return Err("invalid edit range".into());
+            }
+        }
+        let mut results = Vec::new();
+        for (id, (revision, edits)) in grouped {
+            let buffer = self
+                .buffers
+                .iter_mut()
+                .find(|buffer| buffer.id() == id)
+                .ok_or("unknown buffer")?;
+            let revision = buffer
+                .apply_agent_edits(revision, &edits)
+                .map_err(str::to_owned)?;
+            results.push(json!({"buffer_id":id,"revision":revision}));
+            let tracked = self.agent_modified.entry(id).or_insert((0, revision));
+            tracked.0 += 1;
+            tracked.1 = revision;
+        }
+        self.changed();
+        Ok(Value::Array(results))
+    }
+
+    fn agent_panel_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Esc => self.agent_panel_focused = false,
+            KeyCode::Backspace => {
+                self.agent_input.pop();
+            }
+            KeyCode::Enter => {
+                let prompt = std::mem::take(&mut self.agent_input);
+                if !prompt.trim().is_empty() {
+                    self.enqueue_agent_prompt(prompt);
+                }
+            }
+            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.agent_input.push(character)
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn enqueue_agent_prompt(&mut self, prompt: String) {
+        self.agent_messages.push(AgentMessage {
+            text: format!("> {prompt}"),
+            path: None,
+        });
+        self.agent_prompts.push_back(prompt);
+        self.agent_panel_visible = true;
+        self.message = "Prompt queued for connected agent".into();
+    }
+
+    fn enqueue_context_prompt(&mut self, instruction: &str) {
+        let path = self
+            .current()
+            .path()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| self.current().name());
+        let (line, column) = self.current().cursor_line_col();
+        let selection = self.current().selected_text().unwrap_or_default();
+        self.enqueue_agent_prompt(format!(
+            "{instruction}\nFile: {path}\nCursor: {}:{}\nSelection:\n{selection}",
+            line + 1,
+            column + 1
+        ));
+    }
+
+    fn accept_agent_changes(&mut self) {
+        let ids = self.agent_modified.keys().copied().collect::<Vec<_>>();
+        let mut saved = 0;
+        for id in ids {
+            if let Some(buffer) = self.buffers.iter_mut().find(|buffer| buffer.id() == id) {
+                if buffer.path().is_some() && buffer.save().is_ok() {
+                    saved += 1;
+                    self.agent_modified.remove(&id);
+                }
+            }
+        }
+        self.git.request_refresh();
+        self.message = if self.agent_modified.is_empty() {
+            format!("Accepted and saved {saved} agent-modified file(s)")
+        } else {
+            format!(
+                "Saved {saved} file(s); unsaved agent changes remain in {} buffer(s)",
+                self.agent_modified.len()
+            )
+        };
+    }
+
+    fn revert_agent_changes(&mut self) {
+        let changes = std::mem::take(&mut self.agent_modified);
+        let mut skipped = 0;
+        for (id, (count, revision)) in changes {
+            if let Some(buffer) = self.buffers.iter_mut().find(|buffer| buffer.id() == id) {
+                if buffer.revision() != revision {
+                    self.agent_modified.insert(id, (count, revision));
+                    skipped += 1;
+                    continue;
+                }
+                for _ in 0..count {
+                    buffer.undo();
+                }
+            }
+        }
+        self.message = if skipped == 0 {
+            "Reverted tracked agent edits".into()
+        } else {
+            format!("Revert skipped {skipped} buffer(s) changed after the agent edit")
+        };
     }
     fn reset_view(&mut self) {
         self.top_line = 0;
@@ -1307,21 +2322,52 @@ impl Editor {
         ])
         .split(frame.area());
         self.sidebar_area = None;
+        self.problems_area = None;
+        self.agent_area = None;
+        self.agent_hits.clear();
+        let mut workspace_area = areas[1];
+        if self.problems_visible && !self.focus_mode && areas[1].height >= 10 {
+            let sections =
+                Layout::vertical([Constraint::Min(1), Constraint::Length(8)]).split(areas[1]);
+            workspace_area = sections[0];
+            self.problems_area = Some(sections[1]);
+        }
+        if self.agent_panel_visible && !self.focus_mode && workspace_area.width >= 60 {
+            let columns =
+                Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)])
+                    .split(workspace_area);
+            workspace_area = columns[0];
+            self.agent_area = Some(columns[1]);
+        }
         if self.focus_mode {
             self.body = frame.area();
-        } else if self.sidebar_visible && areas[1].width >= 40 {
-            let sidebar_width = areas[1].width.saturating_div(3).clamp(18, 32);
+        } else if self.sidebar_visible && workspace_area.width >= 40 {
+            let sidebar_width = workspace_area.width.saturating_div(3).clamp(18, 32);
             let columns =
                 Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(1)])
-                    .split(areas[1]);
+                    .split(workspace_area);
             self.sidebar_area = Some(columns[0]);
             self.body = columns[1];
             self.render_sidebar(frame, columns[0]);
         } else {
-            self.body = areas[1];
+            self.body = workspace_area;
+        }
+        self.secondary_area = None;
+        if let Some(split) = &self.split {
+            let panes = if split.direction == SplitDirection::Right {
+                Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(self.body)
+            } else {
+                Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)])
+                    .split(self.body)
+            };
+            self.body = panes[split.active];
+            self.secondary_area = Some(panes[1 - split.active]);
         }
         self.gutter_width = if self.markdown_reading[self.active] {
             0
+        } else if !self.config.editor.line_numbers {
+            2
         } else {
             ((self.top_line + usize::from(self.body.height)).min(self.current().len_lines()))
                 .max(1)
@@ -1388,6 +2434,7 @@ impl Editor {
                 Paragraph::new(visible).style(Style::default().bg(theme::BASE).fg(theme::TEXT)),
                 self.body,
             );
+            self.render_secondary_pane(frame);
             let status = self.modal_prompt_text().unwrap_or_else(|| {
                 format!(
                     "{}   Markdown reading view   F1 help   Ctrl+Shift+M source",
@@ -1422,6 +2469,10 @@ impl Editor {
             if self.explorer_context_visible {
                 self.render_explorer_context(frame);
             }
+            self.render_problems(frame);
+            self.render_agent_panel(frame);
+            self.render_lsp_popups(frame);
+            self.render_git_prompts(frame);
             return;
         }
 
@@ -1439,26 +2490,38 @@ impl Editor {
         {
             let raw = self.current().line(line_idx);
             let line_start = self.current().line_start_char(line_idx);
-            let marker = current_path
+            let diagnostic = current_path
                 .as_deref()
-                .and_then(|path| self.git.snapshot().line_decoration(path, line_idx + 1));
+                .and_then(|path| self.lsp.as_ref()?.diagnostic_at(path, line_idx));
+            let marker = diagnostic
+                .map(|item| if item.severity == 1 { 'E' } else { 'W' })
+                .or_else(|| {
+                    current_path
+                        .as_deref()
+                        .and_then(|path| self.git.snapshot().line_decoration(path, line_idx + 1))
+                });
             let marker_style = Style::default().bg(theme::MANTLE).fg(match marker {
+                Some('E') => theme::RED,
+                Some('W') => theme::PEACH,
                 Some('A') => theme::GREEN,
                 Some('D') => theme::RED,
                 Some('M') => theme::PEACH,
                 _ => theme::MANTLE,
             });
-            let mut spans = vec![
-                Span::styled(format!("{} ", marker.unwrap_or(' ')), marker_style),
-                Span::styled(
+            let mut spans = vec![Span::styled(
+                format!("{} ", marker.unwrap_or(' ')),
+                marker_style,
+            )];
+            if self.config.editor.line_numbers {
+                spans.push(Span::styled(
                     format!(
                         "{:>width$} ",
                         line_idx + 1,
                         width = usize::from(self.gutter_width - 3)
                     ),
                     Style::default().fg(theme::OVERLAY0).bg(theme::MANTLE),
-                ),
-            ];
+                ));
+            }
             let mut screen_col = 0usize;
             let mut char_offset = 0usize;
             let content = raw.trim_end_matches(['\n', '\r']);
@@ -1489,12 +2552,18 @@ impl Editor {
             }
             lines.push(Line::from(spans));
         }
+        let paragraph = Paragraph::new(lines)
+            .style(Style::default().bg(theme::BASE).fg(theme::TEXT))
+            .block(Block::default().borders(Borders::NONE));
         frame.render_widget(
-            Paragraph::new(lines)
-                .style(Style::default().bg(theme::BASE).fg(theme::TEXT))
-                .block(Block::default().borders(Borders::NONE)),
+            if self.config.editor.word_wrap {
+                paragraph.wrap(Wrap { trim: false })
+            } else {
+                paragraph
+            },
             self.body,
         );
+        self.render_secondary_pane(frame);
 
         let (line, char_col) = self.current().cursor_line_col();
         let screen_col = self.current().cursor_screen_col();
@@ -1513,8 +2582,15 @@ impl Editor {
             self.message.clone()
         };
         let git = self.git_status_text();
+        let lsp = self.lsp.as_ref().map_or(String::new(), |service| {
+            format!("   LSP {}", service.status())
+        });
+        let agent = self
+            .agent
+            .as_ref()
+            .map_or(String::new(), |_| "   Agent API".into());
         let status = format!(
-            "{left}   Ln {}, Col {}{git}   F1 help  Ctrl+S save  Ctrl+Q quit",
+            "{left}   Ln {}, Col {}{git}{lsp}{agent}   F1 help  Ctrl+S save  Ctrl+Q quit",
             line + 1,
             char_col + 1
         );
@@ -1564,6 +2640,10 @@ impl Editor {
         if self.explorer_context_visible {
             self.render_explorer_context(frame);
         }
+        self.render_problems(frame);
+        self.render_agent_panel(frame);
+        self.render_lsp_popups(frame);
+        self.render_git_prompts(frame);
     }
 
     fn render_help(&self, frame: &mut Frame) {
@@ -1682,6 +2762,298 @@ impl Editor {
                 ),
             popup,
         );
+    }
+
+    fn render_problems(&self, frame: &mut Frame) {
+        let Some(area) = self.problems_area else {
+            return;
+        };
+        let items = self.current_diagnostics();
+        let visible = usize::from(area.height.saturating_sub(2));
+        let start = self
+            .problems_selected
+            .saturating_sub(visible.saturating_sub(1));
+        let lines = items
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(visible)
+            .map(|(index, item)| {
+                let severity = if item.severity == 1 {
+                    "error"
+                } else {
+                    "warning"
+                };
+                let label = format!(
+                    " {severity} {}:{}:{}  {}",
+                    item.path.display(),
+                    item.line + 1,
+                    item.column + 1,
+                    item.message
+                );
+                Line::styled(
+                    label,
+                    if index == self.problems_selected {
+                        Style::default().bg(theme::SURFACE1).fg(theme::TEXT)
+                    } else if item.severity == 1 {
+                        Style::default().fg(theme::RED)
+                    } else {
+                        Style::default().fg(theme::PEACH)
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(
+            Paragraph::new(lines)
+                .style(Style::default().bg(theme::MANTLE))
+                .block(
+                    Block::bordered()
+                        .title(format!(" Problems ({}) — F8 next ", items.len()))
+                        .border_style(Style::default().fg(theme::MAUVE)),
+                ),
+            area,
+        );
+    }
+
+    fn render_agent_panel(&mut self, frame: &mut Frame) {
+        let Some(area) = self.agent_area else {
+            return;
+        };
+        let sections = Layout::vertical([
+            Constraint::Min(3),
+            Constraint::Length(3),
+            Constraint::Length(1),
+        ])
+        .split(area);
+        let visible = usize::from(sections[0].height.saturating_sub(2));
+        let start = self.agent_messages.len().saturating_sub(visible);
+        let mut lines = Vec::new();
+        for (offset, message) in self
+            .agent_messages
+            .iter()
+            .skip(start)
+            .take(visible)
+            .enumerate()
+        {
+            let row = sections[0].y + 1 + offset as u16;
+            if let Some(path) = &message.path {
+                self.agent_hits.push((row, path.clone()));
+            }
+            lines.push(Line::styled(
+                message.text.replace('\n', " "),
+                Style::default().fg(if message.path.is_some() {
+                    theme::BLUE
+                } else {
+                    theme::TEXT
+                }),
+            ));
+        }
+        frame.render_widget(
+            Paragraph::new(lines)
+                .wrap(ratatui::widgets::Wrap { trim: true })
+                .style(Style::default().bg(theme::MANTLE))
+                .block(
+                    Block::bordered()
+                        .title(" Agent activity ")
+                        .border_style(Style::default().fg(theme::MAUVE)),
+                ),
+            sections[0],
+        );
+        let input = format!(
+            "> {}{}\nEnter send   Esc document",
+            self.agent_input,
+            if self.agent_panel_focused { "_" } else { "" }
+        );
+        frame.render_widget(
+            Paragraph::new(input)
+                .style(Style::default().bg(theme::BASE).fg(theme::TEXT))
+                .block(
+                    Block::bordered()
+                        .title(" Prompt ")
+                        .border_style(Style::default().fg(if self.agent_panel_focused {
+                            theme::GREEN
+                        } else {
+                            theme::SURFACE1
+                        })),
+                ),
+            sections[1],
+        );
+        frame.render_widget(
+            Paragraph::new(" [View Diff] [Accept] [Revert] ")
+                .style(Style::default().bg(theme::SURFACE0).fg(theme::SUBTEXT0)),
+            sections[2],
+        );
+    }
+
+    fn render_secondary_pane(&self, frame: &mut Frame) {
+        let (Some(split), Some(area)) = (&self.split, self.secondary_area) else {
+            return;
+        };
+        let index = split.buffers[1 - split.active].min(self.buffers.len().saturating_sub(1));
+        let buffer = &self.buffers[index];
+        let height = usize::from(area.height.saturating_sub(2));
+        let lines = (0..buffer.len_lines())
+            .take(height)
+            .map(|line| {
+                Line::from(vec![
+                    Span::styled(
+                        format!("{:>4} ", line + 1),
+                        Style::default().fg(theme::OVERLAY0),
+                    ),
+                    Span::raw(buffer.line(line).trim_end_matches(['\r', '\n']).to_owned()),
+                ])
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(
+            Paragraph::new(lines)
+                .style(Style::default().bg(theme::BASE).fg(theme::TEXT))
+                .block(
+                    Block::bordered()
+                        .title(format!(" {} — click to focus ", buffer.name()))
+                        .border_style(Style::default().fg(theme::SURFACE1)),
+                ),
+            area,
+        );
+    }
+
+    fn render_lsp_popups(&self, frame: &mut Frame) {
+        let area = frame.area();
+        if let Some(prompt) = &self.lsp_prompt {
+            let width = area.width.clamp(1, 64);
+            let height = area.height.clamp(1, 5);
+            let popup = Rect::new(
+                area.x + area.width.saturating_sub(width) / 2,
+                area.y + area.height.saturating_sub(height) / 3,
+                width,
+                height,
+            );
+            let title = match prompt.kind {
+                LspPromptKind::Rename => " Rename symbol ",
+                LspPromptKind::WorkspaceSymbols => " Workspace symbols ",
+            };
+            frame.render_widget(Clear, popup);
+            frame.render_widget(
+                Paragraph::new(format!("{}_\n\nEnter submit   Esc cancel", prompt.input))
+                    .style(Style::default().bg(theme::BASE).fg(theme::TEXT))
+                    .block(
+                        Block::bordered()
+                            .title(title)
+                            .border_style(Style::default().fg(theme::MAUVE)),
+                    ),
+                popup,
+            );
+        } else if let Some(text) = &self.hover_popup {
+            let width = area.width.clamp(1, 72);
+            let height = area.height.clamp(1, 14);
+            let popup = Rect::new(
+                area.x + area.width.saturating_sub(width) / 2,
+                area.y + area.height.saturating_sub(height) / 3,
+                width,
+                height,
+            );
+            frame.render_widget(Clear, popup);
+            frame.render_widget(
+                Paragraph::new(text.as_str())
+                    .wrap(ratatui::widgets::Wrap { trim: false })
+                    .style(Style::default().bg(theme::BASE).fg(theme::TEXT))
+                    .block(
+                        Block::bordered()
+                            .title(" Hover — any key closes ")
+                            .border_style(Style::default().fg(theme::BLUE)),
+                    ),
+                popup,
+            );
+        } else if let Some(items) = &self.completions {
+            let width = area.width.clamp(1, 48);
+            let height = area.height.clamp(1, 14);
+            let popup = Rect::new(
+                area.x + area.width.saturating_sub(width) / 2,
+                area.y + area.height.saturating_sub(height) / 3,
+                width,
+                height,
+            );
+            let visible = usize::from(height.saturating_sub(2));
+            let start = self
+                .completion_selected
+                .saturating_sub(visible.saturating_sub(1));
+            let lines = items
+                .iter()
+                .enumerate()
+                .skip(start)
+                .take(visible)
+                .map(|(index, item)| {
+                    Line::styled(
+                        format!(" {item}"),
+                        if index == self.completion_selected {
+                            Style::default().bg(theme::SURFACE1).fg(theme::TEXT)
+                        } else {
+                            Style::default().fg(theme::SUBTEXT0)
+                        },
+                    )
+                })
+                .collect::<Vec<_>>();
+            frame.render_widget(Clear, popup);
+            frame.render_widget(
+                Paragraph::new(lines)
+                    .style(Style::default().bg(theme::BASE))
+                    .block(
+                        Block::bordered()
+                            .title(" Completion — Enter insert, Esc close ")
+                            .border_style(Style::default().fg(theme::MAUVE)),
+                    ),
+                popup,
+            );
+        }
+    }
+
+    fn render_git_prompts(&self, frame: &mut Frame) {
+        let area = frame.area();
+        if let Some(path) = &self.git_discard_confirm {
+            let width = area.width.clamp(1, 68);
+            let height = area.height.clamp(1, 7);
+            let popup = Rect::new(
+                area.x + area.width.saturating_sub(width) / 2,
+                area.y + area.height.saturating_sub(height) / 2,
+                width,
+                height,
+            );
+            let text = format!(
+                "Discard working-tree changes in {}?\n\nThis cannot be undone by TTED.\n\nY discard   N/Esc cancel",
+                path.display()
+            );
+            frame.render_widget(Clear, popup);
+            frame.render_widget(
+                Paragraph::new(text)
+                    .style(Style::default().bg(theme::BASE).fg(theme::TEXT))
+                    .block(
+                        Block::bordered()
+                            .title(" Git discard changes ")
+                            .border_style(Style::default().fg(theme::RED)),
+                    ),
+                popup,
+            );
+        } else if let Some(message) = &self.git_commit_prompt {
+            let width = area.width.clamp(1, 72);
+            let height = area.height.clamp(1, 7);
+            let popup = Rect::new(
+                area.x + area.width.saturating_sub(width) / 2,
+                area.y + area.height.saturating_sub(height) / 3,
+                width,
+                height,
+            );
+            let text = format!("{message}_\n\nEnter commit staged changes   Esc cancel");
+            frame.render_widget(Clear, popup);
+            frame.render_widget(
+                Paragraph::new(text)
+                    .style(Style::default().bg(theme::BASE).fg(theme::TEXT))
+                    .block(
+                        Block::bordered()
+                            .title(" Git commit message ")
+                            .border_style(Style::default().fg(theme::GREEN)),
+                    ),
+                popup,
+            );
+        }
     }
 
     fn render_quick_open(&self, frame: &mut Frame) {
@@ -1944,11 +3316,23 @@ impl Editor {
             let decoration = (!row.is_dir)
                 .then(|| self.git.snapshot().decoration(&row.path))
                 .flatten();
+            let diagnostic_count = if row.is_dir {
+                0
+            } else {
+                self.lsp
+                    .as_ref()
+                    .map_or(0, |lsp| lsp.diagnostic_count(&row.path))
+            };
             let label = format!(
-                "{}{} {name}{}",
+                "{}{} {name}{}{}",
                 "  ".repeat(row.depth),
                 marker,
-                decoration.map_or_else(String::new, |status| format!("  {status}"))
+                decoration.map_or_else(String::new, |status| format!("  {status}")),
+                if diagnostic_count > 0 {
+                    format!("  !{diagnostic_count}")
+                } else {
+                    String::new()
+                }
             );
             let active = active_path
                 .as_deref()
@@ -1992,10 +3376,15 @@ impl Editor {
     }
 
     fn highlight_visible_lines(&self, start: usize, end: usize) -> Vec<Vec<Style>> {
-        let Some(path) = self.current().path() else {
-            return vec![Vec::new(); end - start];
+        let syntax = if let Some(path) = self.current().path() {
+            self.syntaxes.find_syntax_for_file(path).ok().flatten()
+        } else {
+            self.current()
+                .name()
+                .rsplit_once('.')
+                .and_then(|(_, extension)| self.syntaxes.find_syntax_by_extension(extension))
         };
-        let Ok(Some(syntax)) = self.syntaxes.find_syntax_for_file(path) else {
+        let Some(syntax) = syntax else {
             return vec![Vec::new(); end - start];
         };
         let mut highlighter = HighlightLines::new(syntax, &self.theme);
@@ -2037,6 +3426,80 @@ fn control_letter(character: char) -> Option<char> {
         .then(|| char::from_u32(value + 96).expect("ASCII control mapping"))
 }
 
+fn key_event_name(key: &KeyEvent) -> String {
+    let mut parts = Vec::new();
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        parts.push("ctrl".to_owned());
+    }
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        parts.push("alt".to_owned());
+    }
+    if key.modifiers.contains(KeyModifiers::SHIFT) {
+        parts.push("shift".to_owned());
+    }
+    let key_name = match key.code {
+        KeyCode::Char(character) => character.to_lowercase().collect(),
+        KeyCode::F(number) => format!("f{number}"),
+        KeyCode::Backspace => "backspace".into(),
+        KeyCode::Enter => "enter".into(),
+        KeyCode::Left => "left".into(),
+        KeyCode::Right => "right".into(),
+        KeyCode::Up => "up".into(),
+        KeyCode::Down => "down".into(),
+        KeyCode::Home => "home".into(),
+        KeyCode::End => "end".into(),
+        KeyCode::PageUp => "pageup".into(),
+        KeyCode::PageDown => "pagedown".into(),
+        KeyCode::Tab => "tab".into(),
+        KeyCode::BackTab => "backtab".into(),
+        KeyCode::Delete => "delete".into(),
+        KeyCode::Insert => "insert".into(),
+        KeyCode::Esc => "esc".into(),
+        _ => return String::new(),
+    };
+    parts.push(key_name);
+    parts.join("+")
+}
+
+fn required_u64(params: &Value, key: &str) -> Result<u64, String> {
+    params
+        .get(key)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("missing or invalid {key}"))
+}
+
+fn collect_workspace_files(root: &Path, limit: usize) -> Vec<PathBuf> {
+    fn visit(root: &Path, directory: &Path, limit: usize, files: &mut Vec<PathBuf>) {
+        if files.len() >= limit {
+            return;
+        }
+        let Ok(entries) = fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if files.len() >= limit {
+                break;
+            }
+            let path = entry.path();
+            let name = entry.file_name();
+            if name.to_string_lossy().starts_with('.')
+                || matches!(name.to_str(), Some("target" | "node_modules"))
+            {
+                continue;
+            }
+            if path.is_dir() {
+                visit(root, &path, limit, files);
+            } else if path.is_file() {
+                files.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
+            }
+        }
+    }
+    let mut files = Vec::new();
+    visit(root, root, limit, &mut files);
+    files.sort();
+    files
+}
+
 fn valid_entry_name(name: &str) -> bool {
     let mut components = Path::new(name).components();
     matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
@@ -2060,16 +3523,43 @@ mod input_tests {
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
     use ratatui::{backend::TestBackend, Terminal};
+    use serde_json::json;
 
+    use crate::buffer::Buffer;
     use crate::explorer::Explorer;
 
-    use super::{control_letter, valid_entry_name, Editor};
+    use super::{control_letter, key_event_name, valid_entry_name, Command, Editor};
 
     #[test]
     fn maps_raw_control_characters() {
         assert_eq!(control_letter('\u{3}'), Some('c'));
         assert_eq!(control_letter('\u{11}'), Some('q'));
         assert_eq!(control_letter('q'), None);
+    }
+
+    #[test]
+    fn normalizes_configurable_key_names() {
+        assert_eq!(
+            key_event_name(&KeyEvent::new(
+                KeyCode::Char('P'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT
+            )),
+            "ctrl+shift+p"
+        );
+        assert_eq!(
+            key_event_name(&KeyEvent::new(KeyCode::F(8), KeyModifiers::NONE)),
+            "f8"
+        );
+    }
+
+    #[test]
+    fn directory_argument_becomes_visible_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("example.txt"), "hello").unwrap();
+        let editor = Editor::new(vec![root.path().to_path_buf()]);
+        assert_eq!(editor.explorer.root(), root.path());
+        assert!(editor.sidebar_visible);
+        assert_eq!(editor.current().name(), "Untitled");
     }
 
     #[test]
@@ -2372,5 +3862,124 @@ mod input_tests {
         let started = Instant::now();
         terminal.draw(|frame| editor.render(frame)).unwrap();
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn git_discard_refuses_unsaved_editor_content() {
+        let mut editor = Editor::new(Vec::new());
+        editor.current_mut().insert("unsaved");
+        editor
+            .execute_command(Command::GitDiscardCurrentFile)
+            .unwrap();
+        assert!(editor.git_discard_confirm.is_none());
+        assert!(editor.message.contains("Save or discard editor changes"));
+    }
+
+    #[test]
+    fn git_commit_prompt_refuses_an_empty_message() {
+        let mut editor = Editor::new(Vec::new());
+        editor.execute_command(Command::GitCommit).unwrap();
+        editor
+            .git_commit_key(KeyEvent::from(KeyCode::Enter))
+            .unwrap();
+        assert!(editor.git_commit_prompt.is_some());
+        assert!(editor.message.contains("cannot be empty"));
+    }
+
+    #[test]
+    fn split_panes_track_independent_active_buffers() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first.txt");
+        let second = root.path().join("second.txt");
+        fs::write(&first, "first").unwrap();
+        fs::write(&second, "second").unwrap();
+        let mut editor = Editor::new(vec![first]);
+        editor.execute_command(Command::SplitRight).unwrap();
+        editor.open_path(second);
+        assert_eq!(editor.split.as_ref().unwrap().buffers, [1, 0]);
+        editor.execute_command(Command::FocusNextSplit).unwrap();
+        assert_eq!(editor.active, 0);
+        editor.execute_command(Command::FocusNextSplit).unwrap();
+        assert_eq!(editor.active, 1);
+        editor.execute_command(Command::CloseSplit).unwrap();
+        assert!(editor.split.is_none());
+    }
+
+    #[test]
+    fn agent_batch_rejects_stale_input_before_any_edit() {
+        let mut editor = Editor::new(Vec::new());
+        let first = editor.current().id();
+        editor.buffers.push(Buffer::empty());
+        let second = editor.buffers[1].id();
+        let result = editor.apply_agent_batch(&json!({"edits":[
+            {"buffer_id":first,"revision":0,"start":0,"end":0,"text":"x"},
+            {"buffer_id":second,"revision":99,"start":0,"end":0,"text":"y"}
+        ]}));
+        assert_eq!(result, Err("stale buffer revision".into()));
+        assert_eq!(editor.buffers[0].text(), "");
+        assert_eq!(editor.buffers[1].text(), "");
+    }
+
+    #[test]
+    fn agent_edit_method_uses_stable_id_and_revision() {
+        let mut editor = Editor::new(Vec::new());
+        let id = editor.current().id();
+        let result = editor
+            .execute_agent_method(
+                "edit.apply",
+                &json!({"buffer_id":id,"revision":0,"start":0,"end":0,"text":"agent"}),
+            )
+            .unwrap();
+        assert_eq!(result["revision"], 1);
+        assert_eq!(editor.current().text(), "agent");
+    }
+
+    #[test]
+    fn agent_prompt_queue_and_streamed_response() {
+        let mut editor = Editor::new(Vec::new());
+        editor.enqueue_agent_prompt("please review".into());
+        let prompt = editor
+            .execute_agent_method("agent.next_prompt", &json!({}))
+            .unwrap();
+        assert_eq!(prompt["prompt"], "please review");
+        editor
+            .execute_agent_method("agent.respond", &json!({"text":"Working","append":false}))
+            .unwrap();
+        editor
+            .execute_agent_method("agent.respond", &json!({"text":"…done","append":true}))
+            .unwrap();
+        assert_eq!(editor.agent_messages.last().unwrap().text, "Working…done");
+    }
+
+    #[test]
+    fn tracked_agent_edit_can_be_reverted() {
+        let mut editor = Editor::new(Vec::new());
+        let id = editor.current().id();
+        editor
+            .execute_agent_method(
+                "edit.apply",
+                &json!({"buffer_id":id,"revision":0,"start":0,"end":0,"text":"agent"}),
+            )
+            .unwrap();
+        editor.revert_agent_changes();
+        assert_eq!(editor.current().text(), "");
+        assert!(editor.agent_modified.is_empty());
+    }
+
+    #[test]
+    fn agent_revert_never_undoes_a_later_human_edit() {
+        let mut editor = Editor::new(Vec::new());
+        let id = editor.current().id();
+        editor
+            .execute_agent_method(
+                "edit.apply",
+                &json!({"buffer_id":id,"revision":0,"start":0,"end":0,"text":"agent"}),
+            )
+            .unwrap();
+        editor.current_mut().insert_typed(" human");
+        editor.revert_agent_changes();
+        assert_eq!(editor.current().text(), "agent human");
+        assert!(editor.agent_modified.contains_key(&id));
+        assert!(editor.message.contains("skipped"));
     }
 }
