@@ -1,0 +1,13 @@
+{
+  "name": "tted-playground",
+  "enabled": true,
+  "themes": [
+    { "name": "Midnight", "background": "#10131a" },
+    { "name": "Paper", "background": "#faf7f0" }
+  ],
+  "settings": {
+    "tabSize": 4,
+    "wordWrap": false,
+    "mouse": true
+  }
+}
