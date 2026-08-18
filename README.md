@@ -49,6 +49,7 @@ With no filenames TTED opens an untitled buffer; Ctrl+S then prompts for a path.
 | Ctrl+Shift+S | Save As |
 | Ctrl+F | Open Find and Replace |
 | Ctrl+P | Fuzzy-find and open a workspace file |
+| Ctrl+Shift+P | Open the Command Palette |
 | Ctrl+W | Close tab; press twice when it has unsaved changes |
 | Ctrl+E | Toggle and focus the file explorer |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
@@ -80,6 +81,10 @@ press Enter to open the selection.
 Ctrl+F opens centered Find and Replace. Enter and Shift+Enter move to the next
 and previous matches, Tab switches fields, Alt+C toggles case sensitivity,
 Ctrl+R replaces the current match, and Ctrl+Shift+R replaces all matches.
+
+Ctrl+Shift+P opens the Command Palette. Commands can be found by fuzzy title or
+stable ID, then run with Enter. Right-click an explorer item to surface its file
+operations without memorizing the explorer keys.
 
 When an open file changes on disk, TTED reloads it automatically if the editor
 buffer is clean. If unsaved edits could be lost, use `R` to reload the disk

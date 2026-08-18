@@ -177,6 +177,16 @@ already-open result focuses its existing tab.
 Expected: replace-all is undone as one edit and Esc closes the dialog without
 changing text.
 
+## 14. Commands and context actions
+
+1. Press Ctrl+Shift+P, fuzzy-search for `focus`, and press Enter.
+2. Confirm Focus Mode activates; use the palette again to turn it off.
+3. Open the explorer and right-click a file or directory.
+4. Confirm the compact file-operation menu appears and Esc closes it.
+
+Expected: palette actions behave identically to their shortcuts, and the
+right-click menu exposes New File, New Directory, Rename, and Delete.
+
 ## Deferred features
 
 These are planned but are not expected to work in the current build:

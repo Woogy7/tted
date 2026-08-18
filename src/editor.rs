@@ -26,6 +26,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::buffer::{Buffer, ExternalChange};
+use crate::command::{Command, CommandPalette};
 use crate::explorer::{Explorer, ExplorerAction};
 use crate::quick_open::QuickOpen;
 use crate::theme;
@@ -70,6 +71,7 @@ pub struct Editor {
     clipboard: Option<String>,
     search: Option<SearchState>,
     quick_open: Option<QuickOpen>,
+    command_palette: Option<CommandPalette>,
     close_armed: Option<usize>,
     path_prompt: Option<String>,
     help_visible: bool,
@@ -81,6 +83,7 @@ pub struct Editor {
     explorer: Explorer,
     explorer_prompt: Option<ExplorerPrompt>,
     delete_confirm: Option<PathBuf>,
+    explorer_context_visible: bool,
     external_prompt: Option<ExternalPrompt>,
     syntaxes: SyntaxSet,
     theme: Theme,
@@ -119,6 +122,7 @@ impl Editor {
             clipboard: None,
             search: None,
             quick_open: None,
+            command_palette: None,
             close_armed: None,
             path_prompt: None,
             help_visible: false,
@@ -130,6 +134,7 @@ impl Editor {
             explorer: Explorer::new(workspace_root),
             explorer_prompt: None,
             delete_confirm: None,
+            explorer_context_visible: false,
             external_prompt: None,
             syntaxes,
             theme,
@@ -193,6 +198,8 @@ impl Editor {
                     self.refresh_search_selection();
                 } else if let Some(picker) = &mut self.quick_open {
                     picker.push_str(text.trim_end_matches(['\r', '\n']));
+                } else if let Some(palette) = &mut self.command_palette {
+                    palette.push_str(text.trim_end_matches(['\r', '\n']));
                 } else if let Some(prompt) = &mut self.explorer_prompt {
                     prompt.input.push_str(text.trim_end_matches(['\r', '\n']));
                 } else {
@@ -207,8 +214,27 @@ impl Editor {
                     || self.delete_confirm.is_some()
                     || self.close_armed.is_some()
                     || self.quick_open.is_some()
-                    || self.search.is_some() => {}
+                    || self.search.is_some()
+                    || self.command_palette.is_some()
+                    || self.explorer_context_visible => {}
             Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::Down(MouseButton::Right)
+                    if self
+                        .sidebar_area
+                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into())) =>
+                {
+                    let area = self.sidebar_area.expect("sidebar area checked above");
+                    let height = usize::from(area.height.saturating_sub(2).max(1));
+                    let visible = usize::from(mouse.row.saturating_sub(area.y + 1));
+                    if mouse.row > area.y
+                        && mouse.row < area.y + area.height.saturating_sub(1)
+                        && self.explorer.scroll() + visible < self.explorer.rows().len()
+                    {
+                        self.explorer.select_visible(visible, height);
+                        self.explorer.set_focused(true);
+                        self.explorer_context_visible = true;
+                    }
+                }
                 MouseEventKind::ScrollUp
                     if self
                         .sidebar_area
@@ -317,8 +343,7 @@ impl Editor {
             return Ok(false);
         }
         if key.code == KeyCode::F(1) {
-            self.help_visible = true;
-            return Ok(false);
+            return self.execute_command(Command::ShowHelp);
         }
         if self.external_prompt.is_some() {
             return self.external_prompt_key(key);
@@ -328,6 +353,9 @@ impl Editor {
         }
         if self.delete_confirm.is_some() {
             return self.delete_confirm_key(key);
+        }
+        if self.explorer_context_visible {
+            return self.explorer_context_key(key);
         }
         if self.explorer_prompt.is_some() {
             return self.explorer_prompt_key(key);
@@ -341,73 +369,36 @@ impl Editor {
         if self.quick_open.is_some() {
             return self.quick_open_key(key);
         }
-        if key.code == KeyCode::F(11) {
-            self.toggle_focus_mode();
+        if self.command_palette.is_some() {
+            return self.command_palette_key(key);
+        }
+        if ctrl && shift && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P')) {
+            self.command_palette = Some(CommandPalette::new());
             return Ok(false);
+        }
+        if key.code == KeyCode::F(11) {
+            return self.execute_command(Command::FocusMode);
         }
         if key.code == KeyCode::F(6)
             || (ctrl && shift && matches!(key.code, KeyCode::Char('m') | KeyCode::Char('M')))
         {
-            if self
-                .current()
-                .path()
-                .and_then(|path| path.extension())
-                .is_some_and(|ext| {
-                    ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown")
-                })
-            {
-                self.markdown_reading[self.active] = !self.markdown_reading[self.active];
-                self.top_line = 0;
-                self.message = if self.markdown_reading[self.active] {
-                    "Markdown reading view"
-                } else {
-                    "Markdown source view"
-                }
-                .into();
-            } else {
-                self.message = "Markdown reading view is available for .md files".into();
-            }
-            return Ok(false);
+            return self.execute_command(Command::ToggleMarkdownReader);
         }
         if alt && matches!(key.code, KeyCode::Left | KeyCode::Right) {
-            if key.code == KeyCode::Right {
-                self.active = (self.active + 1) % self.buffers.len();
+            return self.execute_command(if key.code == KeyCode::Right {
+                Command::NextTab
             } else {
-                self.active = (self.active + self.buffers.len() - 1) % self.buffers.len();
-            }
-            self.reset_view();
-            return Ok(false);
+                Command::PreviousTab
+            });
         }
         if ctrl && key.code == KeyCode::Char('n') {
-            self.explorer_prompt = Some(ExplorerPrompt {
-                kind: ExplorerPromptKind::NewFile,
-                input: String::new(),
-                base: self.explorer.root().to_path_buf(),
-                source: None,
-            });
-            return Ok(false);
+            return self.execute_command(Command::NewFile);
         }
         if ctrl && key.code == KeyCode::Char('p') {
-            self.quick_open = Some(QuickOpen::new(self.explorer.root().to_path_buf()));
-            return Ok(false);
+            return self.execute_command(Command::QuickOpen);
         }
         if ctrl && key.code == KeyCode::Char('e') {
-            if self.focus_mode {
-                self.message = "Exit Focus Mode with F11 before opening the explorer".into();
-                return Ok(false);
-            }
-            self.sidebar_visible = !self.sidebar_visible;
-            self.explorer.set_focused(self.sidebar_visible);
-            if self.sidebar_visible {
-                self.explorer.refresh();
-            }
-            self.message = if self.sidebar_visible {
-                "File explorer opened and focused"
-            } else {
-                "File explorer closed"
-            }
-            .into();
-            return Ok(false);
+            return self.execute_command(Command::ToggleExplorer);
         }
         if self.sidebar_visible && self.explorer.focused() && !ctrl && !alt {
             let height = self
@@ -450,47 +441,20 @@ impl Editor {
         if ctrl {
             match key.code {
                 KeyCode::Char('q') => {
-                    if self.buffers.iter().any(Buffer::is_dirty) && !self.quit_armed {
-                        self.quit_armed = true;
-                        self.message = "Unsaved changes — press Ctrl+Q again to quit".into();
-                        return Ok(false);
-                    }
-                    return Ok(true);
+                    return self.execute_command(Command::Quit);
                 }
                 KeyCode::Char('s') => {
-                    if shift || self.current().path().is_none() {
-                        self.path_prompt = Some(
-                            self.current()
-                                .path()
-                                .map(|path| path.display().to_string())
-                                .unwrap_or_default(),
-                        );
-                        self.message.clear();
+                    return self.execute_command(if shift {
+                        Command::SaveAs
                     } else {
-                        match self.current_mut().save() {
-                            Ok(()) => {
-                                self.explorer.refresh();
-                                self.message = "Saved".into();
-                            }
-                            Err(error) => self.message = format!("Save failed: {error}"),
-                        }
-                    }
+                        Command::Save
+                    });
                 }
                 KeyCode::Char('f') => {
-                    if self.markdown_reading[self.active] {
-                        self.message = "Return to Markdown source before searching".into();
-                    } else {
-                        self.search = Some(SearchState {
-                            query: String::new(),
-                            replacement: String::new(),
-                            editing_replacement: false,
-                            case_sensitive: false,
-                        });
-                        self.message.clear();
-                    }
+                    return self.execute_command(Command::FindReplace);
                 }
                 KeyCode::Char('w') => {
-                    self.request_close_tab(self.active);
+                    return self.execute_command(Command::CloseFile);
                 }
                 KeyCode::Char('c') => {
                     if let Some(text) = self.current().selected_text() {
@@ -534,12 +498,10 @@ impl Editor {
                     self.changed();
                 }
                 KeyCode::Tab | KeyCode::PageDown if !self.buffers.is_empty() => {
-                    self.active = (self.active + 1) % self.buffers.len();
-                    self.reset_view();
+                    return self.execute_command(Command::NextTab);
                 }
                 KeyCode::BackTab | KeyCode::PageUp if !self.buffers.is_empty() => {
-                    self.active = (self.active + self.buffers.len() - 1) % self.buffers.len();
-                    self.reset_view();
+                    return self.execute_command(Command::PreviousTab);
                 }
                 _ => {}
             }
@@ -780,6 +742,162 @@ impl Editor {
         Ok(false)
     }
 
+    fn command_palette_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Esc => self.command_palette = None,
+            KeyCode::Backspace => self
+                .command_palette
+                .as_mut()
+                .expect("command palette")
+                .pop(),
+            KeyCode::Up => self
+                .command_palette
+                .as_mut()
+                .expect("command palette")
+                .move_selection(-1),
+            KeyCode::Down => self
+                .command_palette
+                .as_mut()
+                .expect("command palette")
+                .move_selection(1),
+            KeyCode::PageUp => self
+                .command_palette
+                .as_mut()
+                .expect("command palette")
+                .move_selection(-8),
+            KeyCode::PageDown => self
+                .command_palette
+                .as_mut()
+                .expect("command palette")
+                .move_selection(8),
+            KeyCode::Enter => {
+                let command = self
+                    .command_palette
+                    .as_ref()
+                    .and_then(CommandPalette::selected_command);
+                self.command_palette = None;
+                if let Some(command) = command {
+                    return self.execute_command(command);
+                }
+            }
+            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => self
+                .command_palette
+                .as_mut()
+                .expect("command palette")
+                .push(character),
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn execute_command(&mut self, command: Command) -> Result<bool> {
+        match command {
+            Command::NewFile => {
+                self.explorer_prompt = Some(ExplorerPrompt {
+                    kind: ExplorerPromptKind::NewFile,
+                    input: String::new(),
+                    base: self.explorer.root().to_path_buf(),
+                    source: None,
+                });
+            }
+            Command::Save | Command::SaveAs => {
+                if command == Command::SaveAs || self.current().path().is_none() {
+                    self.path_prompt = Some(
+                        self.current()
+                            .path()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_default(),
+                    );
+                    self.message.clear();
+                } else {
+                    match self.current_mut().save() {
+                        Ok(()) => {
+                            self.explorer.refresh();
+                            self.message = "Saved".into();
+                        }
+                        Err(error) => self.message = format!("Save failed: {error}"),
+                    }
+                }
+            }
+            Command::CloseFile => self.request_close_tab(self.active),
+            Command::QuickOpen => {
+                self.quick_open = Some(QuickOpen::new(self.explorer.root().to_path_buf()))
+            }
+            Command::ToggleExplorer => {
+                if self.focus_mode {
+                    self.message = "Exit Focus Mode with F11 before opening the explorer".into();
+                } else {
+                    self.sidebar_visible = !self.sidebar_visible;
+                    self.explorer.set_focused(self.sidebar_visible);
+                    if self.sidebar_visible {
+                        self.explorer.refresh();
+                    }
+                    self.message = if self.sidebar_visible {
+                        "File explorer opened and focused"
+                    } else {
+                        "File explorer closed"
+                    }
+                    .into();
+                }
+            }
+            Command::FocusMode => self.toggle_focus_mode(),
+            Command::FindReplace => {
+                if self.markdown_reading[self.active] {
+                    self.message = "Return to Markdown source before searching".into();
+                } else {
+                    self.search = Some(SearchState {
+                        query: String::new(),
+                        replacement: String::new(),
+                        editing_replacement: false,
+                        case_sensitive: false,
+                    });
+                    self.message.clear();
+                }
+            }
+            Command::NextTab | Command::PreviousTab => {
+                if !self.buffers.is_empty() {
+                    if command == Command::NextTab {
+                        self.active = (self.active + 1) % self.buffers.len();
+                    } else {
+                        self.active = (self.active + self.buffers.len() - 1) % self.buffers.len();
+                    }
+                    self.reset_view();
+                }
+            }
+            Command::ToggleMarkdownReader => {
+                if self
+                    .current()
+                    .path()
+                    .and_then(|path| path.extension())
+                    .is_some_and(|ext| {
+                        ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown")
+                    })
+                {
+                    self.markdown_reading[self.active] = !self.markdown_reading[self.active];
+                    self.top_line = 0;
+                    self.message = if self.markdown_reading[self.active] {
+                        "Markdown reading view"
+                    } else {
+                        "Markdown source view"
+                    }
+                    .into();
+                } else {
+                    self.message = "Markdown reading view is available for .md files".into();
+                }
+            }
+            Command::ShowHelp => self.help_visible = true,
+            Command::Quit => {
+                if self.buffers.iter().any(Buffer::is_dirty) && !self.quit_armed {
+                    self.quit_armed = true;
+                    self.message = "Unsaved changes — press Ctrl+Q again to quit".into();
+                } else {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     fn start_explorer_prompt(&mut self, kind: ExplorerPromptKind) {
         let source = matches!(kind, ExplorerPromptKind::Rename)
             .then(|| self.explorer.selected_path().map(PathBuf::from))
@@ -805,6 +923,29 @@ impl Editor {
             base,
             source,
         });
+    }
+
+    fn explorer_context_key(&mut self, key: KeyEvent) -> Result<bool> {
+        self.explorer_context_visible = false;
+        match key.code {
+            KeyCode::Char('n' | 'N') if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.start_explorer_prompt(ExplorerPromptKind::NewDirectory)
+            }
+            KeyCode::Char('n') => self.start_explorer_prompt(ExplorerPromptKind::NewFile),
+            KeyCode::Char('r' | 'R') => self.start_explorer_prompt(ExplorerPromptKind::Rename),
+            KeyCode::Char('d' | 'D') => {
+                if let Some(path) = self.explorer.selected_path().map(PathBuf::from) {
+                    if self.path_is_open(&path) {
+                        self.message = "Close the file before deleting it".into();
+                    } else {
+                        self.delete_confirm = Some(path);
+                    }
+                }
+            }
+            KeyCode::Esc => {}
+            _ => self.explorer_context_visible = true,
+        }
+        Ok(false)
     }
 
     fn explorer_prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -1267,6 +1408,12 @@ impl Editor {
             if self.search.is_some() {
                 self.render_search(frame);
             }
+            if self.command_palette.is_some() {
+                self.render_command_palette(frame);
+            }
+            if self.explorer_context_visible {
+                self.render_explorer_context(frame);
+            }
             return;
         }
 
@@ -1389,6 +1536,12 @@ impl Editor {
         if self.search.is_some() {
             self.render_search(frame);
         }
+        if self.command_palette.is_some() {
+            self.render_command_palette(frame);
+        }
+        if self.explorer_context_visible {
+            self.render_explorer_context(frame);
+        }
     }
 
     fn render_help(&self, frame: &mut Frame) {
@@ -1420,6 +1573,7 @@ impl Editor {
             "  Search: Tab, Alt+C                    Field/case toggle",
             "  Search: Ctrl+R / Ctrl+Shift+R         Replace / replace all",
             "  Ctrl+P                                Quick Open workspace file",
+            "  Ctrl+Shift+P                          Command Palette",
             "  Ctrl+W                                Close tab",
             "  Ctrl+E                                Toggle/focus file explorer",
             "  Explorer: arrows, Enter, Esc/Tab      Navigate/open/return",
@@ -1488,7 +1642,7 @@ impl Editor {
             width,
             height,
         );
-        let name = self
+        let name: String = self
             .buffers
             .get(tab)
             .map_or_else(|| "this file".into(), Buffer::name);
@@ -1611,6 +1765,92 @@ impl Editor {
                     Block::bordered()
                         .title(" Find and Replace ")
                         .border_style(Style::default().fg(theme::MAUVE)),
+                ),
+            popup,
+        );
+    }
+
+    fn render_command_palette(&self, frame: &mut Frame) {
+        let Some(palette) = &self.command_palette else {
+            return;
+        };
+        let area = frame.area();
+        let width = area.width.clamp(1, 72);
+        let height = area.height.clamp(1, 18);
+        let popup = Rect::new(
+            area.x + area.width.saturating_sub(width) / 2,
+            area.y + area.height.saturating_sub(height) / 3,
+            width,
+            height,
+        );
+        let visible_count = usize::from(height.saturating_sub(4));
+        let start = palette
+            .selected()
+            .saturating_sub(visible_count.saturating_sub(1));
+        let mut lines = vec![
+            Line::styled(
+                format!("> {}_", palette.query()),
+                Style::default()
+                    .fg(theme::TEXT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Line::default(),
+        ];
+        for (index, command) in palette
+            .matches()
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(visible_count)
+        {
+            lines.push(Line::styled(
+                format!(" {}  [{}]", command.title(), command.id()),
+                if index == palette.selected() {
+                    Style::default().bg(theme::SURFACE1).fg(theme::MAUVE)
+                } else {
+                    Style::default().fg(theme::SUBTEXT0)
+                },
+            ));
+        }
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .style(Style::default().bg(theme::BASE))
+                .block(
+                    Block::bordered()
+                        .title(" Command Palette — Enter run, Esc cancel ")
+                        .border_style(Style::default().fg(theme::MAUVE)),
+                ),
+            popup,
+        );
+    }
+
+    fn render_explorer_context(&self, frame: &mut Frame) {
+        let area = frame.area();
+        let width = area.width.clamp(1, 44);
+        let height = area.height.clamp(1, 9);
+        let popup = Rect::new(
+            area.x + area.width.saturating_sub(width) / 2,
+            area.y + area.height.saturating_sub(height) / 2,
+            width,
+            height,
+        );
+        let name: String = self
+            .explorer
+            .selected_path()
+            .and_then(Path::file_name)
+            .map_or_else(|| "workspace".into(), |name| name.to_string_lossy().into());
+        let text = format!(
+            "{name}\n\nN       New file\nShift+N New directory\nR       Rename\nD       Delete\nEsc     Cancel"
+        );
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(text)
+                .style(Style::default().bg(theme::BASE).fg(theme::TEXT))
+                .block(
+                    Block::bordered()
+                        .title(" Explorer actions ")
+                        .border_style(Style::default().fg(theme::SAPPHIRE)),
                 ),
             popup,
         );
@@ -1770,7 +2010,9 @@ mod input_tests {
         time::{Duration, Instant},
     };
 
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
+    use crossterm::event::{
+        Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
     use ratatui::{backend::TestBackend, Terminal};
 
     use crate::explorer::Explorer;
@@ -1939,6 +2181,49 @@ mod input_tests {
             ))
             .unwrap();
         assert_eq!(editor.current().text(), "two two");
+    }
+
+    #[test]
+    fn command_palette_filters_and_runs_shared_commands() {
+        let mut editor = Editor::new(Vec::new());
+        editor
+            .key(KeyEvent::new(
+                KeyCode::Char('P'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ))
+            .unwrap();
+        for character in "focus".chars() {
+            editor
+                .key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                .unwrap();
+        }
+        editor
+            .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(editor.focus_mode);
+        assert!(editor.command_palette.is_none());
+    }
+
+    #[test]
+    fn right_clicking_explorer_item_surfaces_context_actions() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("notes.txt"), "notes").unwrap();
+        let mut editor = Editor::new(Vec::new());
+        editor.explorer = Explorer::new(root.path().to_path_buf());
+        editor.sidebar_visible = true;
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| editor.render(frame)).unwrap();
+        let area = editor.sidebar_area.unwrap();
+        editor
+            .handle_event(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Right),
+                column: area.x + 1,
+                row: area.y + 1,
+                modifiers: KeyModifiers::NONE,
+            }))
+            .unwrap();
+        assert!(editor.explorer_context_visible);
     }
 
     #[test]

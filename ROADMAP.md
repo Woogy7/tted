@@ -407,6 +407,10 @@ Create one coherent action system before adding many advanced features.
 
 Represent editor actions as named commands rather than scattering behaviour across keyboard event handlers.
 
+**✅ Completed for the current feature set.** Major file, workspace, view, tab,
+Markdown, help, and application actions have stable command IDs and flow through
+one executor shared by keyboard shortcuts and the palette.
+
 Examples:
 
 ```text
@@ -430,6 +434,10 @@ Keyboard shortcuts, menus, the command palette, and eventually agents should inv
 
 Add a command palette, likely:
 
+**✅ Completed.** `Ctrl+Shift+P` opens a centered fuzzy command picker showing
+human titles and stable IDs. Arrow/Page navigation and Enter execute the same
+commands used by direct shortcuts.
+
 ```text
 Ctrl+Shift+P
 ```
@@ -449,6 +457,10 @@ This is central to TTED's discoverability philosophy.
 ## 3.3 Context actions
 
 Allow obvious mouse interactions to surface available operations.
+
+**✅ Completed at an intentionally small scope.** Tab close buttons expose their
+action directly, and right-clicking an explorer item opens a compact create,
+rename, and delete action menu. There is no nested menu framework.
 
 Do not create complicated nested UI prematurely.
 

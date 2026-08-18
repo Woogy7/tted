@@ -96,6 +96,12 @@ Ctrl+P opens a centered Quick Open picker over workspace files. It performs
 case-insensitive fuzzy path matching, supports arrow and page navigation, and
 opens or focuses the selected file with Enter.
 
+Major actions are represented by stable internal command IDs rather than being
+tied directly to key events. Ctrl+Shift+P opens a fuzzy command palette over
+these actions. The same executor serves direct shortcuts and palette choices,
+providing a clean seam for future menus and agent API calls. Right-clicking an
+explorer item surfaces a compact context menu for its file operations.
+
 Syntax highlighting is selected by filename and currently covers the common
 programming and markup formats in the playground, including Rust, Ruby, Python,
 JavaScript, HTML, CSS, JSON, and Markdown.
@@ -119,6 +125,7 @@ from the reading view.
 | Ctrl+S / Ctrl+Shift+S | Save, Save As |
 | Ctrl+F | Find and replace text |
 | Ctrl+P | Fuzzy-find and open a workspace file |
+| Ctrl+Shift+P | Open the Command Palette |
 | Ctrl+W | Close the current tab |
 | Ctrl+E | Toggle and focus the file explorer |
 | Ctrl+N | Create and open a new workspace file |
@@ -136,6 +143,7 @@ TTED remains a single Rust crate with deliberately small modules:
 
 - `buffer.rs` owns text, cursor and selection state, revisions, history, Unicode
   coordinate conversion, searching, and persistence;
+- `command.rs` owns stable action IDs, display titles, and palette filtering;
 - `editor.rs` owns application state, event dispatch, tabs, panels, prompts,
   terminal rendering, syntax styles, and workspace interactions;
 - `explorer.rs` owns the lazy workspace tree, selection, scrolling, and folder
@@ -149,7 +157,7 @@ LSP, Git services, and the future agent API have not been introduced yet.
 
 ## Verification
 
-The project currently has 44 passing unit tests covering buffer edits, natural
+The project currently has 48 passing unit tests covering buffer edits, natural
 undo groups, saved/dirty identity, multiline selection and paste, CRLF and final
 newline preservation, wrapped search, Save As, external modification/deletion
 flows, Markdown rendering, file-explorer filtering, raw terminal control keys,
@@ -184,6 +192,5 @@ This is still an early editor foundation. Notable limitations are:
 - configuration, custom keybindings, Git information, LSP, split panes, and the
   agent interaction API remain to be built.
 
-Phase 1 editing-core hardening and Phase 2's workspace, explorer, tabs, Focus
-Mode, Quick Open, and search workflows are complete. The next roadmap phase is
-Git integration.
+Phases 1–3 are complete: the editing core, workspace UX, and shared command and
+discoverability system are in place. The next roadmap phase is Git awareness.
