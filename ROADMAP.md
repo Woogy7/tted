@@ -482,6 +482,10 @@ Start read-only.
 
 Detect whether the workspace belongs to a Git repository.
 
+**✅ Completed.** A focused background worker detects the containing repository
+and refreshes porcelain status without mutating editor state off the UI thread.
+The status bar shows the current branch and clean (`✓`) or dirty (`*`) state.
+
 Display:
 
 - current branch;
@@ -490,6 +494,10 @@ Display:
 ## 4.2 Explorer decorations
 
 Show file state where useful:
+
+**✅ Completed.** Visible files receive subtle colored `M`, `A`, `?`, or `D`
+decorations from the latest background snapshot. Saves and explorer operations
+request an immediate refresh in addition to periodic polling.
 
 ```text
 M modified

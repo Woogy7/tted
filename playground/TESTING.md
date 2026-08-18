@@ -187,6 +187,16 @@ changing text.
 Expected: palette actions behave identically to their shortcuts, and the
 right-click menu exposes New File, New Directory, Rename, and Delete.
 
+## 15. Git awareness
+
+1. Launch TTED in a Git repository and inspect the status bar.
+2. Modify, add, and create an untracked file, waiting up to two seconds after
+   each change.
+3. Open the explorer and inspect the affected file rows.
+
+Expected: the branch is shown with `✓` or `*`, editing never pauses during Git
+refreshes, and files receive subtle `M`, `A`, `?`, or `D` decorations.
+
 ## Deferred features
 
 These are planned but are not expected to work in the current build:

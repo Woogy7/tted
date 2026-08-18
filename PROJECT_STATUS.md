@@ -102,6 +102,11 @@ these actions. The same executor serves direct shortcuts and palette choices,
 providing a clean seam for future menus and agent API calls. Right-clicking an
 explorer item surfaces a compact context menu for its file operations.
 
+Git repository detection and status collection run in a short-lived background
+worker, returning immutable snapshots to the UI loop. The status bar displays
+branch and clean/dirty state; explorer files show subtle modified, added,
+untracked, or deleted decorations. Git integration is currently read-only.
+
 Syntax highlighting is selected by filename and currently covers the common
 programming and markup formats in the playground, including Rust, Ruby, Python,
 JavaScript, HTML, CSS, JSON, and Markdown.
@@ -148,6 +153,7 @@ TTED remains a single Rust crate with deliberately small modules:
   terminal rendering, syntax styles, and workspace interactions;
 - `explorer.rs` owns the lazy workspace tree, selection, scrolling, and folder
   expansion state;
+- `git.rs` owns background repository detection and porcelain status snapshots;
 - `markdown.rs` converts parsed Markdown events into styled terminal lines;
 - `theme.rs` defines the shared Catppuccin-inspired interface palette;
 - `main.rs` owns terminal setup and guaranteed teardown.
@@ -157,7 +163,7 @@ LSP, Git services, and the future agent API have not been introduced yet.
 
 ## Verification
 
-The project currently has 48 passing unit tests covering buffer edits, natural
+The project currently has 50 passing unit tests covering buffer edits, natural
 undo groups, saved/dirty identity, multiline selection and paste, CRLF and final
 newline preservation, wrapped search, Save As, external modification/deletion
 flows, Markdown rendering, file-explorer filtering, raw terminal control keys,
@@ -192,5 +198,6 @@ This is still an early editor foundation. Notable limitations are:
 - configuration, custom keybindings, Git information, LSP, split panes, and the
   agent interaction API remain to be built.
 
-Phases 1–3 are complete: the editing core, workspace UX, and shared command and
-discoverability system are in place. The next roadmap phase is Git awareness.
+Phases 1–3 are complete. Phase 4.1–4.2 repository detection and explorer
+decorations are also complete; editor gutter changes and status/diff views are
+next.

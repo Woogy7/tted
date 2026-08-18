@@ -13,3 +13,4 @@ pub const BLUE: Color = Color::Rgb(137, 180, 250);
 pub const SAPPHIRE: Color = Color::Rgb(116, 199, 236);
 pub const GREEN: Color = Color::Rgb(166, 227, 161);
 pub const PEACH: Color = Color::Rgb(250, 179, 135);
+pub const RED: Color = Color::Rgb(243, 139, 168);

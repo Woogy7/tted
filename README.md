@@ -23,6 +23,7 @@ Herdr without requiring an AI agent.
 - natural undo groups for typing and deletion, with atomic paste and indentation
 - smart closing-bracket dedent that aligns closers with their opening level
 - automatic clean-file reload and explicit reload/keep prompts for disk conflicts
+- background Git branch/clean-state detection and explorer file decorations
 
 Git, LSP, and the agent API remain deferred while the workspace experience is
 developed further.
@@ -85,6 +86,9 @@ Ctrl+R replaces the current match, and Ctrl+Shift+R replaces all matches.
 Ctrl+Shift+P opens the Command Palette. Commands can be found by fuzzy title or
 stable ID, then run with Enter. Right-click an explorer item to surface its file
 operations without memorizing the explorer keys.
+
+Inside a Git repository, the status bar shows the branch plus `✓` for clean or
+`*` for dirty. Explorer files use subtle `M`, `A`, `?`, and `D` decorations.
 
 When an open file changes on disk, TTED reloads it automatically if the editor
 buffer is clean. If unsaved edits could be lost, use `R` to reload the disk

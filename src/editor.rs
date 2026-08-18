@@ -28,6 +28,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::buffer::{Buffer, ExternalChange};
 use crate::command::{Command, CommandPalette};
 use crate::explorer::{Explorer, ExplorerAction};
+use crate::git::GitService;
 use crate::quick_open::QuickOpen;
 use crate::theme;
 
@@ -81,6 +82,7 @@ pub struct Editor {
     sidebar_before_focus: bool,
     sidebar_area: Option<Rect>,
     explorer: Explorer,
+    git: GitService,
     explorer_prompt: Option<ExplorerPrompt>,
     delete_confirm: Option<PathBuf>,
     explorer_context_visible: bool,
@@ -131,7 +133,8 @@ impl Editor {
             focus_mode: false,
             sidebar_before_focus: false,
             sidebar_area: None,
-            explorer: Explorer::new(workspace_root),
+            explorer: Explorer::new(workspace_root.clone()),
+            git: GitService::new(workspace_root),
             explorer_prompt: None,
             delete_confirm: None,
             explorer_context_visible: false,
@@ -166,6 +169,7 @@ impl Editor {
                 redraw |= self.check_external_files();
                 last_disk_check = Instant::now();
             }
+            redraw |= self.git.tick();
             if redraw {
                 terminal.draw(|frame| self.render(frame))?;
             }
@@ -813,6 +817,7 @@ impl Editor {
                     match self.current_mut().save() {
                         Ok(()) => {
                             self.explorer.refresh();
+                            self.git.request_refresh();
                             self.message = "Saved".into();
                         }
                         Err(error) => self.message = format!("Save failed: {error}"),
@@ -1002,6 +1007,7 @@ impl Editor {
                 match result {
                     Ok(()) => {
                         self.explorer.refresh();
+                        self.git.request_refresh();
                         self.message = format!("Updated {}", destination.display());
                         if matches!(prompt.kind, ExplorerPromptKind::NewFile) {
                             self.open_path(destination);
@@ -1028,6 +1034,7 @@ impl Editor {
                 match result {
                     Ok(()) => {
                         self.explorer.refresh();
+                        self.git.request_refresh();
                         self.message = format!("Deleted {}", path.display());
                     }
                     Err(error) => self.message = format!("Delete failed: {error}"),
@@ -1064,6 +1071,7 @@ impl Editor {
                     match self.current_mut().save_as(path.trim()) {
                         Ok(()) => {
                             self.explorer.refresh();
+                            self.git.request_refresh();
                             self.message = "Saved".into();
                         }
                         Err(error) => self.message = format!("Save failed: {error}"),
@@ -1491,8 +1499,9 @@ impl Editor {
         } else {
             self.message.clone()
         };
+        let git = self.git_status_text();
         let status = format!(
-            "{left}   Ln {}, Col {}   F1 help  Ctrl+S save  Ctrl+Q quit",
+            "{left}   Ln {}, Col {}{git}   F1 help  Ctrl+S save  Ctrl+Q quit",
             line + 1,
             char_col + 1
         );
@@ -1880,6 +1889,16 @@ impl Editor {
         self.external_prompt_text()
     }
 
+    fn git_status_text(&self) -> String {
+        let snapshot = self.git.snapshot();
+        if !snapshot.is_repository() {
+            return String::new();
+        }
+        let branch = snapshot.branch.as_deref().unwrap_or("detached");
+        let state = if snapshot.is_dirty() { "*" } else { "✓" };
+        format!("   Git {branch} {state}")
+    }
+
     fn render_sidebar(&mut self, frame: &mut Frame, area: Rect) {
         let inner_height = area.height.saturating_sub(2) as usize;
         self.explorer.ensure_visible(inner_height);
@@ -1909,7 +1928,15 @@ impl Editor {
                 || row.path.display().to_string(),
                 |name| name.to_string_lossy().into(),
             );
-            let label = format!("{}{} {name}", "  ".repeat(row.depth), marker);
+            let decoration = (!row.is_dir)
+                .then(|| self.git.snapshot().decoration(&row.path))
+                .flatten();
+            let label = format!(
+                "{}{} {name}{}",
+                "  ".repeat(row.depth),
+                marker,
+                decoration.map_or_else(String::new, |status| format!("  {status}"))
+            );
             let active = active_path
                 .as_deref()
                 .is_some_and(|open| same_path(open, &row.path));
@@ -1922,6 +1949,12 @@ impl Editor {
                 Style::default()
                     .fg(theme::MAUVE)
                     .add_modifier(Modifier::BOLD)
+            } else if let Some(status) = decoration {
+                Style::default().fg(match status {
+                    'A' | '?' => theme::GREEN,
+                    'D' => theme::RED,
+                    _ => theme::PEACH,
+                })
             } else if row.is_dir {
                 Style::default().fg(theme::BLUE)
             } else {
