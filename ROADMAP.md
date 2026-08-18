@@ -280,6 +280,11 @@ Turn TTED from a capable file editor into a pleasant project editor.
 
 Replace the flattened explorer with a directory tree.
 
+**✅ Completed.** The explorer now builds a lazy, directories-first tree with
+indentation and exclusions for hidden/build directories. It supports keyboard
+focus, arrow/Home/End/Page navigation, scrolling, Left/Right collapse and
+expand, Enter to open, and equivalent mouse click/wheel interactions.
+
 Support:
 
 - folders;
@@ -302,6 +307,12 @@ Gitignore-aware filtering can be added where appropriate.
 
 Add deliberate file operations:
 
+**✅ Completed.** With the explorer focused, `N`, `Shift+N`, `R`, and `D` create
+files, create directories, rename, and request deletion. Operations use a
+single-name prompt, refuse overwrite and workspace-escape paths, refresh the
+tree on success, and require explicit confirmation before recursive deletion.
+Open files and folders containing them are protected from rename or deletion.
+
 - New file
 - New directory
 - Rename
@@ -312,6 +323,11 @@ Destructive operations must require an appropriate confirmation.
 ## 2.3 Better tabs
 
 Improve the existing tab bar.
+
+**✅ Completed for the required v0.1 scope.** Tabs retain clear active and dirty
+styling, expose a mouse close affordance with unsaved-change protection, and
+shift their visible window automatically so the active tab remains visible when
+the bar overflows. Drag/reordering remains optional future work.
 
 Eventually support:
 
@@ -326,6 +342,10 @@ Tab drag/reordering is desirable but not required immediately.
 ## 2.4 Focus Mode
 
 Implement a one-action Focus Mode.
+
+**✅ Completed.** `F11` toggles a document-only layout that hides the explorer,
+tabs, status bar, and other chrome. Exiting restores whether the explorer was
+visible before Focus Mode was entered.
 
 Focus Mode should hide:
 

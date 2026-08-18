@@ -18,13 +18,14 @@ Herdr without requiring an AI agent.
 - file-aware syntax highlighting for common programming and markup languages
 - a read-only Markdown reading view toggled independently from source editing
 - a Catppuccin Mocha-inspired editor interface
-- a collapsible, mouse-enabled workspace file explorer
+- a collapsible workspace tree with keyboard and mouse navigation
 - grapheme-aware movement and deletion with terminal-cell-aware cursor placement
 - natural undo groups for typing and deletion, with atomic paste and indentation
+- smart closing-bracket dedent that aligns closers with their opening level
 - automatic clean-file reload and explicit reload/keep prompts for disk conflicts
 
-Syntax highlighting, the file explorer, Markdown rendering, Git, LSP, and the
-agent API are intentionally deferred until the editing core is proven.
+Git, LSP, and the agent API remain deferred while the workspace experience is
+developed further.
 
 ## Build and run
 
@@ -33,8 +34,7 @@ cargo build
 cargo run -- path/to/file another/file
 ```
 
-With no filenames TTED opens an untitled buffer. Saving an untitled buffer is not
-yet supported.
+With no filenames TTED opens an untitled buffer; Ctrl+S then prompts for a path.
 
 ## Keys
 
@@ -45,17 +45,32 @@ yet supported.
 | Shift + navigation | Select text |
 | Ctrl+C / Ctrl+X / Ctrl+V | Copy, cut, or paste the TTED clipboard |
 | Ctrl+S | Save |
+| Ctrl+N | Create and open a new workspace file |
 | Ctrl+Shift+S | Save As |
 | Ctrl+F | Find text in the current file |
 | Ctrl+W | Close tab; press twice when it has unsaved changes |
-| Ctrl+B | Toggle the file explorer |
+| Ctrl+E | Toggle and focus the file explorer |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
 | Ctrl+Tab / Ctrl+PageDown | Next tab |
 | Ctrl+Shift+Tab / Ctrl+PageUp | Previous tab |
 | Alt+Left / Alt+Right | Previous / next tab (portable fallback) |
 | Ctrl+Shift+M / F6 | Toggle Markdown source / reading view |
+| F11 | Toggle document-only Focus Mode |
 | Ctrl+Q | Quit; press twice when changes are unsaved |
 | F1 | Show keybindings help |
+
+In the explorer, use arrows, Home/End, or Page Up/Down to navigate; Left/Right
+collapse or expand folders, Enter opens a file, and Esc or Tab returns focus to
+the document. N creates a file, Shift+N creates a directory, R renames, and D
+opens a permanent-delete confirmation.
+
+New-file and rename input appears in a centered dialog. Successfully creating a
+file opens its tab immediately with document focus. Tabs keep the active file in
+view when they overflow and include a clickable `×` close control.
+
+Closing a dirty tab opens a centered confirmation dialog; Y discards and closes,
+while N or Esc returns safely to the document. F11 hides tabs, status, explorer,
+and other chrome, then restores the previous layout when pressed again.
 
 When an open file changes on disk, TTED reloads it automatically if the editor
 buffer is clean. If unsaved edits could be lost, use `R` to reload the disk

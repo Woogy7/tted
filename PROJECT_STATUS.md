@@ -44,6 +44,7 @@ Indentation conveniences currently include:
 - Enter retaining the current line's leading indentation;
 - an extra indentation level after `{`, `[`, or `(`;
 - an indented blank line when Enter is pressed between a bracket pair;
+- a closing bracket typed on an indentation-only line moving back one level;
 - Tab advancing to four-column stops;
 - Backspace removing leading spaces to the previous tab stop;
 - Shift+Tab unindenting the current line.
@@ -56,14 +57,27 @@ bracketed-paste edit.
 ## Files and workspace
 
 Files supplied on the command line open as tabs. Tabs can be selected by mouse,
-cycled by keyboard, and closed with unsaved-change protection. Save uses a
+cycled by keyboard, and closed by Ctrl+W or their mouse `×`, with a centered
+unsaved-change confirmation. When tabs overflow, the visible window follows the
+active tab. Save uses a
 temporary sibling file followed by rename. Save As supports both existing and
-untitled buffers, and successful Save As updates the tab filename.
+untitled buffers, and successful Save As updates the tab filename and refreshes
+the explorer immediately.
 
-The file explorer is toggled with Ctrl+B. It lists ordinary workspace files by
-relative path, omits hidden folders and `target`, and opens files by mouse click.
-Clicking a file that is already open focuses its existing tab. The explorer
-automatically stays hidden when the terminal is too narrow.
+The file explorer is toggled with Ctrl+E, avoiding the default prefix used by
+tmux and Herdr. It presents a lazy directory tree,
+omits hidden and common build directories, and opens focused files with Enter or
+a mouse click. Arrows, Home/End, Page Up/Down, and the mouse wheel navigate it;
+Left/Right and clicks collapse or expand folders. Esc or Tab returns focus to
+the document. Opening a file that is already open focuses its existing tab. The
+explorer automatically stays hidden when the terminal is too narrow.
+
+With the explorer focused, N creates a file, Shift+N creates a directory, R
+renames the selected item, and D requests deletion. Delete requires explicit Y
+confirmation. Operations reject path traversal and accidental overwrite; open
+files and folders containing open files must be closed before rename or delete.
+Ctrl+N opens the centered new-file dialog from anywhere; a created file opens
+immediately with focus ready for editing.
 
 Open files are checked periodically for disk changes. Clean buffers reload
 automatically. A changed file with unsaved editor content requires an explicit
@@ -83,7 +97,8 @@ JavaScript, HTML, CSS, JSON, and Markdown.
 Markdown files can switch between editable source and a read-only reading view
 with Ctrl+Shift+M or F6. The reading view formats headings, paragraphs, lists,
 task markers, emphasis, quotes, rules, inline code, code blocks, and raw HTML.
-Global commands such as Ctrl+Q, Ctrl+W, Ctrl+B, and tab switching remain available
+Arrow keys, Page Up/Down, Home/End, and the mouse wheel scroll rendered content.
+Global commands such as Ctrl+Q, Ctrl+W, Ctrl+E, and tab switching remain available
 from the reading view.
 
 ## Key controls
@@ -98,9 +113,11 @@ from the reading view.
 | Ctrl+S / Ctrl+Shift+S | Save, Save As |
 | Ctrl+F | Find text |
 | Ctrl+W | Close the current tab |
-| Ctrl+B | Toggle the file explorer |
+| Ctrl+E | Toggle and focus the file explorer |
+| Ctrl+N | Create and open a new workspace file |
 | Alt+Left / Alt+Right | Previous or next tab |
 | Ctrl+Shift+M / F6 | Toggle Markdown reading view |
+| F11 | Toggle document-only Focus Mode |
 | Ctrl+Q | Quit, with unsaved-change protection |
 
 Ctrl+Tab is handled when the terminal can distinguish it from Tab. Alt+Left and
@@ -114,6 +131,8 @@ TTED remains a single Rust crate with deliberately small modules:
   coordinate conversion, searching, and persistence;
 - `editor.rs` owns application state, event dispatch, tabs, panels, prompts,
   terminal rendering, syntax styles, and workspace interactions;
+- `explorer.rs` owns the lazy workspace tree, selection, scrolling, and folder
+  expansion state;
 - `markdown.rs` converts parsed Markdown events into styled terminal lines;
 - `theme.rs` defines the shared Catppuccin-inspired interface palette;
 - `main.rs` owns terminal setup and guaranteed teardown.
@@ -123,7 +142,7 @@ LSP, Git services, and the future agent API have not been introduced yet.
 
 ## Verification
 
-The project currently has 28 passing unit tests covering buffer edits, natural
+The project currently has 38 passing unit tests covering buffer edits, natural
 undo groups, saved/dirty identity, multiline selection and paste, CRLF and final
 newline preservation, wrapped search, Save As, external modification/deletion
 flows, Markdown rendering, file-explorer filtering, raw terminal control keys,
@@ -148,8 +167,7 @@ This is still an early editor foundation. Notable limitations are:
 
 - undo transactions still store full rope snapshots; grouping is natural now,
   but a compact edit-based history may eventually reduce memory use;
-- the explorer is a flattened, mouse-oriented list without directory expansion,
-  keyboard focus, scrolling, file creation, rename, or deletion;
+- explorer filtering is not yet gitignore-aware;
 - search is exact and case-sensitive, with no live match count or replacement;
 - syntax state is recomputed for visible rendering rather than cached by buffer
   revision;
@@ -159,7 +177,6 @@ This is still an early editor foundation. Notable limitations are:
 - configuration, custom keybindings, Git information, LSP, split panes, and the
   agent interaction API remain to be built.
 
-Phase 1 editing-core hardening is complete. The next roadmap phase is workspace
-and explorer UX: turn the explorer into a keyboard-navigable collapsible tree,
-then add deliberate file operations, better overflowing tabs, Focus Mode, Quick
-Open, and stronger search workflows.
+Phase 1 editing-core hardening and Phase 2.1–2.4's tree explorer, safe file
+operations, improved tabs, and Focus Mode are complete. Next are Quick Open and
+stronger search workflows.

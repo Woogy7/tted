@@ -120,21 +120,48 @@ aligned while scrolling, and a successful Save As updates the tab filename.
 
 ## 9. File explorer
 
-1. Press Ctrl+B to open the file explorer.
-2. Click a file that is not open and confirm a new tab appears.
-3. Click a file that is already open and confirm its existing tab is focused.
-4. Press Ctrl+B again to return to the document-only layout.
+1. Press Ctrl+E to open the file explorer.
+2. Use Up/Down, Home/End, and Page Up/Down; confirm the highlighted row moves
+   and the tree scrolls.
+3. Select a folder and use Right/Left to expand and collapse it.
+4. Press Enter on a file and confirm a new tab appears. Open it again and confirm
+   its existing tab is focused.
+5. Repeat folder toggling and file opening with mouse clicks, and scroll with the
+   mouse wheel over the explorer.
+6. Press N and create a temporary file; use Shift+N to create a temporary folder.
+7. Select the temporary file and press R to rename it.
+8. Press D on the renamed file. Confirm that N or Esc cancels, then repeat and
+   press Y to delete it. Delete the temporary folder the same way.
+9. Press Ctrl+E again to return to the document-only layout.
 
-Expected: hidden directories and `target` are omitted, while files below ordinary
-workspace folders are shown by relative path.
+Expected: folders appear before files with clear indentation. Hidden directories
+and common build directories are omitted. Esc or Tab returns keyboard focus to
+the document.
+
+## 10. New-file dialog and tabs
+
+1. Press Ctrl+N from the document and enter a filename in the centered dialog.
+2. Confirm the new file opens immediately and typing goes into its document.
+3. Open enough files to overflow the tab bar and cycle tabs with Alt+Left/Right.
+4. Confirm the active tab remains visible, then click a tab's `×` to close it.
+
+Expected: new filenames are never entered in the status bar. Dirty tabs still
+open a centered dialog and require Y before being discarded.
+
+## 11. Focus Mode
+
+1. Open the explorer, then press F11.
+2. Confirm tabs, explorer, and status bar disappear and the document fills the
+   terminal.
+3. Press F11 again.
+
+Expected: the normal workspace returns with the explorer visible as it was
+before entering Focus Mode.
 
 ## Deferred features
 
 These are planned but are not expected to work in the current build:
 
-- syntax coloring;
-- file explorer and Save As;
-- Markdown preview;
 - split panes and configurable key bindings;
 - Git status, LSP, and agent integration.
 

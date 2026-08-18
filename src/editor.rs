@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{self, Write},
-    path::PathBuf,
+    path::{Component, Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -26,6 +26,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::buffer::{Buffer, ExternalChange};
+use crate::explorer::{Explorer, ExplorerAction};
 use crate::theme;
 
 #[derive(Clone, Copy)]
@@ -34,13 +35,29 @@ struct ExternalPrompt {
     change: ExternalChange,
 }
 
+#[derive(Clone, Copy)]
+enum ExplorerPromptKind {
+    NewFile,
+    NewDirectory,
+    Rename,
+}
+
+struct ExplorerPrompt {
+    kind: ExplorerPromptKind,
+    input: String,
+    base: PathBuf,
+    source: Option<PathBuf>,
+}
+
 pub struct Editor {
     buffers: Vec<Buffer>,
     active: usize,
     top_line: usize,
     left_col: usize,
     body: Rect,
-    tab_hits: Vec<(u16, u16)>,
+    tab_hits: Vec<(u16, u16, usize)>,
+    tab_close_hits: Vec<(u16, u16, usize)>,
+    tab_start: usize,
     markdown_reading: Vec<bool>,
     clipboard: Option<String>,
     search_query: Option<String>,
@@ -49,10 +66,12 @@ pub struct Editor {
     help_visible: bool,
     gutter_width: u16,
     sidebar_visible: bool,
+    focus_mode: bool,
+    sidebar_before_focus: bool,
     sidebar_area: Option<Rect>,
-    sidebar_entries: Vec<PathBuf>,
-    sidebar_hits: Vec<(u16, PathBuf)>,
-    workspace_root: PathBuf,
+    explorer: Explorer,
+    explorer_prompt: Option<ExplorerPrompt>,
+    delete_confirm: Option<PathBuf>,
     external_prompt: Option<ExternalPrompt>,
     syntaxes: SyntaxSet,
     theme: Theme,
@@ -78,7 +97,6 @@ impl Editor {
         let themes = syntect::highlighting::ThemeSet::load_defaults();
         let theme = themes.themes["base16-eighties.dark"].clone();
         let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let sidebar_entries = workspace_files(&workspace_root);
         Self {
             buffers,
             active: 0,
@@ -86,6 +104,8 @@ impl Editor {
             left_col: 0,
             body: Rect::default(),
             tab_hits: Vec::new(),
+            tab_close_hits: Vec::new(),
+            tab_start: 0,
             markdown_reading,
             clipboard: None,
             search_query: None,
@@ -94,10 +114,12 @@ impl Editor {
             help_visible: false,
             gutter_width: 0,
             sidebar_visible: false,
+            focus_mode: false,
+            sidebar_before_focus: false,
             sidebar_area: None,
-            sidebar_entries,
-            sidebar_hits: Vec::new(),
-            workspace_root,
+            explorer: Explorer::new(workspace_root),
+            explorer_prompt: None,
+            delete_confirm: None,
             external_prompt: None,
             syntaxes,
             theme,
@@ -143,40 +165,86 @@ impl Editor {
                 return self.key(key)
             }
             Event::Paste(text) => {
-                if self.help_visible || self.external_prompt.is_some() {
+                if self.help_visible
+                    || self.external_prompt.is_some()
+                    || self.delete_confirm.is_some()
+                    || self.close_armed.is_some()
+                {
                     return Ok(false);
                 } else if let Some(path) = &mut self.path_prompt {
                     path.push_str(text.trim_end_matches(['\r', '\n']));
                 } else if let Some(query) = &mut self.search_query {
                     query.push_str(text.trim_end_matches(['\r', '\n']));
+                } else if let Some(prompt) = &mut self.explorer_prompt {
+                    prompt.input.push_str(text.trim_end_matches(['\r', '\n']));
                 } else {
                     self.current_mut().insert(&text.replace("\r\n", "\n"));
                     self.changed();
                 }
             }
-            Event::Mouse(_) if self.help_visible || self.external_prompt.is_some() => {}
+            Event::Mouse(_)
+                if self.help_visible
+                    || self.external_prompt.is_some()
+                    || self.explorer_prompt.is_some()
+                    || self.delete_confirm.is_some()
+                    || self.close_armed.is_some() => {}
             Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::ScrollUp
+                    if self
+                        .sidebar_area
+                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into())) =>
+                {
+                    let height = self
+                        .sidebar_area
+                        .map_or(1, |area| usize::from(area.height.saturating_sub(2).max(1)));
+                    self.explorer.scroll_by(-3, height);
+                }
+                MouseEventKind::ScrollDown
+                    if self
+                        .sidebar_area
+                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into())) =>
+                {
+                    let height = self
+                        .sidebar_area
+                        .map_or(1, |area| usize::from(area.height.saturating_sub(2).max(1)));
+                    self.explorer.scroll_by(3, height);
+                }
                 MouseEventKind::Down(MouseButton::Left)
                     if self
                         .sidebar_area
                         .is_some_and(|area| area.contains((mouse.column, mouse.row).into())) =>
                 {
-                    if let Some((_, path)) = self
-                        .sidebar_hits
-                        .iter()
-                        .find(|(row, _)| *row == mouse.row)
-                        .cloned()
+                    let area = self.sidebar_area.expect("sidebar area checked above");
+                    let height = usize::from(area.height.saturating_sub(2).max(1));
+                    let visible = usize::from(mouse.row.saturating_sub(area.y + 1));
+                    self.explorer.set_focused(true);
+                    if mouse.row > area.y
+                        && mouse.row < area.y + area.height.saturating_sub(1)
+                        && self.explorer.scroll() + visible < self.explorer.rows().len()
                     {
-                        self.open_path(path);
+                        self.explorer.select_visible(visible, height);
+                        if let ExplorerAction::Open(path) = self.explorer.activate_selected() {
+                            self.open_path(path);
+                            self.explorer.set_focused(false);
+                        }
                     }
                 }
                 MouseEventKind::Down(MouseButton::Left)
                     if mouse.row == self.body.y.saturating_sub(1) =>
                 {
-                    if let Some(tab) = self
+                    self.explorer.set_focused(false);
+                    if let Some((_, _, tab)) = self
+                        .tab_close_hits
+                        .iter()
+                        .find(|(start, end, _)| mouse.column >= *start && mouse.column < *end)
+                        .copied()
+                    {
+                        self.request_close_tab(tab);
+                    } else if let Some((_, _, tab)) = self
                         .tab_hits
                         .iter()
-                        .position(|(start, end)| mouse.column >= *start && mouse.column < *end)
+                        .find(|(start, end, _)| mouse.column >= *start && mouse.column < *end)
+                        .copied()
                     {
                         self.active = tab;
                         self.reset_view();
@@ -187,6 +255,7 @@ impl Editor {
                     if !self.markdown_reading[self.active]
                         && self.body.contains((mouse.column, mouse.row).into()) =>
                 {
+                    self.explorer.set_focused(false);
                     let line = self.top_line + usize::from(mouse.row - self.body.y);
                     let col = self.left_col
                         + usize::from(mouse.column.saturating_sub(self.body.x + self.gutter_width));
@@ -197,8 +266,12 @@ impl Editor {
                 }
                 MouseEventKind::ScrollUp => self.top_line = self.top_line.saturating_sub(3),
                 MouseEventKind::ScrollDown => {
-                    self.top_line =
-                        (self.top_line + 3).min(self.current().len_lines().saturating_sub(1))
+                    let max_top = if self.markdown_reading[self.active] {
+                        self.markdown_max_top()
+                    } else {
+                        self.current().len_lines().saturating_sub(1)
+                    };
+                    self.top_line = (self.top_line + 3).min(max_top)
                 }
                 _ => {}
             },
@@ -230,11 +303,24 @@ impl Editor {
         if self.external_prompt.is_some() {
             return self.external_prompt_key(key);
         }
+        if self.close_armed.is_some() {
+            return self.close_confirm_key(key);
+        }
+        if self.delete_confirm.is_some() {
+            return self.delete_confirm_key(key);
+        }
+        if self.explorer_prompt.is_some() {
+            return self.explorer_prompt_key(key);
+        }
         if self.path_prompt.is_some() {
             return self.path_prompt_key(key);
         }
         if self.search_query.is_some() {
             return self.search_key(key);
+        }
+        if key.code == KeyCode::F(11) {
+            self.toggle_focus_mode();
+            return Ok(false);
         }
         if key.code == KeyCode::F(6)
             || (ctrl && shift && matches!(key.code, KeyCode::Char('m') | KeyCode::Char('M')))
@@ -269,6 +355,71 @@ impl Editor {
             self.reset_view();
             return Ok(false);
         }
+        if ctrl && key.code == KeyCode::Char('n') {
+            self.explorer_prompt = Some(ExplorerPrompt {
+                kind: ExplorerPromptKind::NewFile,
+                input: String::new(),
+                base: self.explorer.root().to_path_buf(),
+                source: None,
+            });
+            return Ok(false);
+        }
+        if ctrl && key.code == KeyCode::Char('e') {
+            if self.focus_mode {
+                self.message = "Exit Focus Mode with F11 before opening the explorer".into();
+                return Ok(false);
+            }
+            self.sidebar_visible = !self.sidebar_visible;
+            self.explorer.set_focused(self.sidebar_visible);
+            if self.sidebar_visible {
+                self.explorer.refresh();
+            }
+            self.message = if self.sidebar_visible {
+                "File explorer opened and focused"
+            } else {
+                "File explorer closed"
+            }
+            .into();
+            return Ok(false);
+        }
+        if self.sidebar_visible && self.explorer.focused() && !ctrl && !alt {
+            let height = self
+                .sidebar_area
+                .map_or(1, |area| usize::from(area.height.saturating_sub(2).max(1)));
+            match key.code {
+                KeyCode::Esc | KeyCode::Tab => self.explorer.set_focused(false),
+                KeyCode::Up => self.explorer.move_selection(-1, height),
+                KeyCode::Down => self.explorer.move_selection(1, height),
+                KeyCode::PageUp => self.explorer.move_selection(-(height as isize), height),
+                KeyCode::PageDown => self.explorer.move_selection(height as isize, height),
+                KeyCode::Home => self.explorer.select_first(),
+                KeyCode::End => self.explorer.select_last(height),
+                KeyCode::Left => self.explorer.collapse_or_parent(height),
+                KeyCode::Right => self.explorer.expand_selected(),
+                KeyCode::Enter => {
+                    if let ExplorerAction::Open(path) = self.explorer.activate_selected() {
+                        self.open_path(path);
+                        self.explorer.set_focused(false);
+                    }
+                }
+                KeyCode::Char('n' | 'N') if shift => {
+                    self.start_explorer_prompt(ExplorerPromptKind::NewDirectory)
+                }
+                KeyCode::Char('n') => self.start_explorer_prompt(ExplorerPromptKind::NewFile),
+                KeyCode::Char('r') => self.start_explorer_prompt(ExplorerPromptKind::Rename),
+                KeyCode::Char('d') => {
+                    if let Some(path) = self.explorer.selected_path().map(PathBuf::from) {
+                        if self.path_is_open(&path) {
+                            self.message = "Close the file before deleting it".into();
+                        } else {
+                            self.delete_confirm = Some(path);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
         if ctrl {
             match key.code {
                 KeyCode::Char('q') => {
@@ -290,7 +441,10 @@ impl Editor {
                         self.message.clear();
                     } else {
                         match self.current_mut().save() {
-                            Ok(()) => self.message = "Saved".into(),
+                            Ok(()) => {
+                                self.explorer.refresh();
+                                self.message = "Saved".into();
+                            }
                             Err(error) => self.message = format!("Save failed: {error}"),
                         }
                     }
@@ -303,22 +457,8 @@ impl Editor {
                         self.message.clear();
                     }
                 }
-                KeyCode::Char('b') => {
-                    self.sidebar_visible = !self.sidebar_visible;
-                    self.message = if self.sidebar_visible {
-                        "File explorer opened"
-                    } else {
-                        "File explorer closed"
-                    }
-                    .into();
-                }
                 KeyCode::Char('w') => {
-                    if self.current().is_dirty() && self.close_armed != Some(self.active) {
-                        self.close_armed = Some(self.active);
-                        self.message = "Unsaved changes — press Ctrl+W again to close tab".into();
-                    } else {
-                        self.close_current_tab();
-                    }
+                    self.request_close_tab(self.active);
                 }
                 KeyCode::Char('c') => {
                     if let Some(text) = self.current().selected_text() {
@@ -375,12 +515,16 @@ impl Editor {
         }
         if self.markdown_reading[self.active] {
             let page = usize::from(self.body.height.max(1));
+            let max_top = self.markdown_max_top();
             match key.code {
                 KeyCode::Up => self.top_line = self.top_line.saturating_sub(1),
-                KeyCode::Down => self.top_line = self.top_line.saturating_add(1),
+                KeyCode::Down => self.top_line = self.top_line.saturating_add(1).min(max_top),
                 KeyCode::PageUp => self.top_line = self.top_line.saturating_sub(page),
-                KeyCode::PageDown => self.top_line = self.top_line.saturating_add(page),
+                KeyCode::PageDown => {
+                    self.top_line = self.top_line.saturating_add(page).min(max_top)
+                }
                 KeyCode::Home => self.top_line = 0,
+                KeyCode::End => self.top_line = max_top,
                 _ => {
                     self.message =
                         "Reading view is read-only; Ctrl+Shift+M returns to source".into()
@@ -390,6 +534,15 @@ impl Editor {
         }
         match key.code {
             KeyCode::Char(c) => {
+                if matches!(c, '}' | ']' | ')')
+                    && self
+                        .current()
+                        .current_line_prefix()
+                        .chars()
+                        .all(char::is_whitespace)
+                {
+                    self.current_mut().unindent_current_line(4);
+                }
                 self.current_mut().insert_typed(&c.to_string());
                 self.changed();
             }
@@ -494,6 +647,135 @@ impl Editor {
         Ok(false)
     }
 
+    fn start_explorer_prompt(&mut self, kind: ExplorerPromptKind) {
+        let source = matches!(kind, ExplorerPromptKind::Rename)
+            .then(|| self.explorer.selected_path().map(PathBuf::from))
+            .flatten();
+        if matches!(kind, ExplorerPromptKind::Rename)
+            && source.as_ref().is_some_and(|path| self.path_is_open(path))
+        {
+            self.message = "Close files before renaming them or their parent folder".into();
+            return;
+        }
+        let base = source
+            .as_deref()
+            .and_then(Path::parent)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.explorer.operation_directory().to_path_buf());
+        let input = source
+            .as_deref()
+            .and_then(Path::file_name)
+            .map_or_else(String::new, |name| name.to_string_lossy().into());
+        self.explorer_prompt = Some(ExplorerPrompt {
+            kind,
+            input,
+            base,
+            source,
+        });
+    }
+
+    fn explorer_prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Esc => {
+                self.explorer_prompt = None;
+                self.message = "File operation cancelled".into();
+            }
+            KeyCode::Backspace => {
+                self.explorer_prompt
+                    .as_mut()
+                    .expect("explorer prompt")
+                    .input
+                    .pop();
+            }
+            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.explorer_prompt
+                    .as_mut()
+                    .expect("explorer prompt")
+                    .input
+                    .push(character);
+            }
+            KeyCode::Enter => {
+                let prompt = self.explorer_prompt.take().expect("explorer prompt");
+                if !valid_entry_name(&prompt.input) {
+                    self.message = "Use a single non-empty file or directory name".into();
+                    self.explorer_prompt = Some(prompt);
+                    return Ok(false);
+                }
+                let destination = prompt.base.join(&prompt.input);
+                if matches!(prompt.kind, ExplorerPromptKind::Rename)
+                    && destination.exists()
+                    && prompt
+                        .source
+                        .as_deref()
+                        .is_none_or(|source| !same_path(source, &destination))
+                {
+                    self.message = "Rename destination already exists".into();
+                    self.explorer_prompt = Some(prompt);
+                    return Ok(false);
+                }
+                let result = match prompt.kind {
+                    ExplorerPromptKind::NewFile => fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&destination)
+                        .map(|_| ()),
+                    ExplorerPromptKind::NewDirectory => fs::create_dir(&destination),
+                    ExplorerPromptKind::Rename => fs::rename(
+                        prompt.source.as_ref().expect("rename prompt has source"),
+                        &destination,
+                    ),
+                };
+                match result {
+                    Ok(()) => {
+                        self.explorer.refresh();
+                        self.message = format!("Updated {}", destination.display());
+                        if matches!(prompt.kind, ExplorerPromptKind::NewFile) {
+                            self.open_path(destination);
+                            self.explorer.set_focused(false);
+                        }
+                    }
+                    Err(error) => self.message = format!("File operation failed: {error}"),
+                }
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn delete_confirm_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Char('y' | 'Y') => {
+                let path = self.delete_confirm.take().expect("delete confirmation");
+                let result = if path.is_dir() {
+                    fs::remove_dir_all(&path)
+                } else {
+                    fs::remove_file(&path)
+                };
+                match result {
+                    Ok(()) => {
+                        self.explorer.refresh();
+                        self.message = format!("Deleted {}", path.display());
+                    }
+                    Err(error) => self.message = format!("Delete failed: {error}"),
+                }
+            }
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                self.delete_confirm = None;
+                self.message = "Delete cancelled".into();
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn path_is_open(&self, path: &Path) -> bool {
+        self.buffers.iter().any(|buffer| {
+            buffer.path().is_some_and(|open| {
+                same_path(open, path) || (path.is_dir() && open.starts_with(path))
+            })
+        })
+    }
+
     fn path_prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
         match key.code {
             KeyCode::Esc => {
@@ -506,7 +788,10 @@ impl Editor {
                     self.message = "Save As requires a path".into();
                 } else {
                     match self.current_mut().save_as(path.trim()) {
-                        Ok(()) => self.message = "Saved".into(),
+                        Ok(()) => {
+                            self.explorer.refresh();
+                            self.message = "Saved".into();
+                        }
                         Err(error) => self.message = format!("Save failed: {error}"),
                     }
                 }
@@ -609,6 +894,68 @@ impl Editor {
         self.reset_view();
     }
 
+    fn request_close_tab(&mut self, tab: usize) {
+        if tab >= self.buffers.len() {
+            return;
+        }
+        self.active = tab;
+        if self.current().is_dirty() {
+            self.close_armed = Some(tab);
+        } else {
+            self.close_current_tab();
+        }
+    }
+
+    fn close_confirm_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Char('y' | 'Y') => {
+                if let Some(tab) = self.close_armed {
+                    self.active = tab.min(self.buffers.len().saturating_sub(1));
+                    self.close_current_tab();
+                }
+            }
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                self.close_armed = None;
+                self.message = "Close cancelled".into();
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn toggle_focus_mode(&mut self) {
+        if self.focus_mode {
+            self.focus_mode = false;
+            self.sidebar_visible = self.sidebar_before_focus;
+            self.message = "Focus Mode off".into();
+        } else {
+            self.sidebar_before_focus = self.sidebar_visible;
+            self.sidebar_visible = false;
+            self.explorer.set_focused(false);
+            self.focus_mode = true;
+            self.message = "Focus Mode on — F11 restores the workspace".into();
+        }
+    }
+
+    fn ensure_active_tab_visible(&mut self, available_width: usize) {
+        self.tab_start = self.tab_start.min(self.active);
+        loop {
+            let leading = usize::from(self.tab_start > 0) * 2;
+            let width = self.buffers[self.tab_start..=self.active]
+                .iter()
+                .map(|buffer| {
+                    let dirty = if buffer.is_dirty() { "●" } else { "" };
+                    UnicodeWidthStr::width(format!(" {}{} × ", buffer.name(), dirty).as_str())
+                })
+                .sum::<usize>()
+                + leading;
+            if width <= available_width || self.tab_start == self.active {
+                break;
+            }
+            self.tab_start += 1;
+        }
+    }
+
     fn open_path(&mut self, path: PathBuf) {
         if let Some(index) = self.buffers.iter().position(|buffer| {
             buffer
@@ -664,6 +1011,12 @@ impl Editor {
         }
     }
 
+    fn markdown_max_top(&self) -> usize {
+        crate::markdown::render(&self.current().text())
+            .len()
+            .saturating_sub(usize::from(self.body.height.max(1)))
+    }
+
     fn render(&mut self, frame: &mut Frame) {
         let areas = Layout::vertical([
             Constraint::Length(1),
@@ -672,8 +1025,9 @@ impl Editor {
         ])
         .split(frame.area());
         self.sidebar_area = None;
-        self.sidebar_hits.clear();
-        if self.sidebar_visible && areas[1].width >= 40 {
+        if self.focus_mode {
+            self.body = frame.area();
+        } else if self.sidebar_visible && areas[1].width >= 40 {
             let sidebar_width = areas[1].width.saturating_div(3).clamp(18, 32);
             let columns =
                 Layout::horizontal([Constraint::Length(sidebar_width), Constraint::Min(1)])
@@ -693,30 +1047,33 @@ impl Editor {
                 .len() as u16
                 + 2
         };
-        self.ensure_visible();
-        let mut tab_x = areas[0].x;
-        self.tab_hits = self
-            .buffers
-            .iter()
-            .map(|buffer| {
+        if !self.markdown_reading[self.active] {
+            self.ensure_visible();
+        }
+        self.tab_hits.clear();
+        self.tab_close_hits.clear();
+        if !self.focus_mode {
+            self.ensure_active_tab_visible(usize::from(areas[0].width));
+            let mut tab_x = areas[0].x;
+            let mut tabs = Vec::new();
+            if self.tab_start > 0 {
+                tabs.push(Span::styled("‹ ", Style::default().fg(theme::OVERLAY0)));
+                tab_x += 2;
+            }
+            for (index, buffer) in self.buffers.iter().enumerate().skip(self.tab_start) {
                 let dirty = if buffer.is_dirty() { "●" } else { "" };
-                let width =
-                    UnicodeWidthStr::width(format!(" {}{} ", buffer.name(), dirty).as_str()) as u16;
-                let hit = (tab_x, tab_x.saturating_add(width));
-                tab_x = hit.1;
-                hit
-            })
-            .collect();
-        let tabs = self
-            .buffers
-            .iter()
-            .enumerate()
-            .map(|(i, b)| {
-                let dirty = if b.is_dirty() { "●" } else { "" };
-                let label = format!(" {}{} ", b.name(), dirty);
-                Span::styled(
+                let label = format!(" {}{} × ", buffer.name(), dirty);
+                let width = UnicodeWidthStr::width(label.as_str()) as u16;
+                if tab_x.saturating_add(width) > areas[0].right() {
+                    tabs.push(Span::styled("›", Style::default().fg(theme::OVERLAY0)));
+                    break;
+                }
+                self.tab_hits.push((tab_x, tab_x + width, index));
+                self.tab_close_hits
+                    .push((tab_x + width.saturating_sub(3), tab_x + width, index));
+                tabs.push(Span::styled(
                     label,
-                    if i == self.active {
+                    if index == self.active {
                         Style::default()
                             .bg(theme::MAUVE)
                             .fg(theme::BASE)
@@ -724,17 +1081,22 @@ impl Editor {
                     } else {
                         Style::default().fg(theme::SUBTEXT0)
                     },
-                )
-            })
-            .collect::<Vec<_>>();
-        frame.render_widget(
-            Paragraph::new(Line::from(tabs)).style(Style::default().bg(theme::MANTLE)),
-            areas[0],
-        );
+                ));
+                tab_x += width;
+            }
+            frame.render_widget(
+                Paragraph::new(Line::from(tabs)).style(Style::default().bg(theme::MANTLE)),
+                areas[0],
+            );
+        }
 
         if self.markdown_reading[self.active] {
             let rendered = crate::markdown::render(&self.current().text());
-            self.top_line = self.top_line.min(rendered.len().saturating_sub(1));
+            self.top_line = self.top_line.min(
+                rendered
+                    .len()
+                    .saturating_sub(usize::from(self.body.height.max(1))),
+            );
             let visible = rendered
                 .into_iter()
                 .skip(self.top_line)
@@ -744,18 +1106,27 @@ impl Editor {
                 Paragraph::new(visible).style(Style::default().bg(theme::BASE).fg(theme::TEXT)),
                 self.body,
             );
-            let status = self.external_prompt_text().unwrap_or_else(|| {
+            let status = self.modal_prompt_text().unwrap_or_else(|| {
                 format!(
                     "{}   Markdown reading view   F1 help   Ctrl+Shift+M source",
                     self.current().name()
                 )
             });
-            frame.render_widget(
-                Paragraph::new(status).style(Style::default().bg(theme::SURFACE0).fg(theme::TEXT)),
-                areas[2],
-            );
+            if !self.focus_mode {
+                frame.render_widget(
+                    Paragraph::new(status)
+                        .style(Style::default().bg(theme::SURFACE0).fg(theme::TEXT)),
+                    areas[2],
+                );
+            }
             if self.help_visible {
                 self.render_help(frame);
+            }
+            if self.explorer_prompt.is_some() {
+                self.render_explorer_prompt(frame);
+            }
+            if self.close_armed.is_some() {
+                self.render_close_prompt(frame);
             }
             return;
         }
@@ -825,7 +1196,7 @@ impl Editor {
             .path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "Untitled".into());
-        let left = if let Some(prompt) = self.external_prompt_text() {
+        let left = if let Some(prompt) = self.modal_prompt_text() {
             prompt
         } else if let Some(path) = &self.path_prompt {
             format!("Save As: {path}_   Enter save  Esc cancel")
@@ -841,10 +1212,12 @@ impl Editor {
             line + 1,
             char_col + 1
         );
-        frame.render_widget(
-            Paragraph::new(status).style(Style::default().bg(theme::SURFACE0).fg(theme::TEXT)),
-            areas[2],
-        );
+        if !self.focus_mode {
+            frame.render_widget(
+                Paragraph::new(status).style(Style::default().bg(theme::SURFACE0).fg(theme::TEXT)),
+                areas[2],
+            );
+        }
         if !self.help_visible
             && line >= self.top_line
             && line < self.top_line + usize::from(self.body.height)
@@ -867,12 +1240,18 @@ impl Editor {
         if self.help_visible {
             self.render_help(frame);
         }
+        if self.explorer_prompt.is_some() {
+            self.render_explorer_prompt(frame);
+        }
+        if self.close_armed.is_some() {
+            self.render_close_prompt(frame);
+        }
     }
 
     fn render_help(&self, frame: &mut Frame) {
         let area = frame.area();
         let width = area.width.min(72);
-        let height = area.height.min(22);
+        let height = area.height.min(25);
         let popup = Rect::new(
             area.x + area.width.saturating_sub(width) / 2,
             area.y + area.height.saturating_sub(height) / 2,
@@ -891,11 +1270,15 @@ impl Editor {
             "  Tab / Shift+Tab                       Indent / unindent",
             "",
             "Files and views",
+            "  Ctrl+N                                Create and open a new file",
             "  Ctrl+S / Ctrl+Shift+S                 Save / Save As",
             "  Ctrl+F                                Find",
             "  Ctrl+W                                Close tab",
-            "  Ctrl+B                                Toggle file explorer",
+            "  Ctrl+E                                Toggle/focus file explorer",
+            "  Explorer: arrows, Enter, Esc/Tab      Navigate/open/return",
+            "  Explorer: N / Shift+N / R / D         New file/dir, rename/delete",
             "  Ctrl+Shift+M / F6                     Markdown reading view",
+            "  F11                                   Toggle Focus Mode",
             "  Ctrl+Q                                Quit",
             "",
             "  F1 or Esc closes this help",
@@ -908,6 +1291,71 @@ impl Editor {
                     Block::bordered()
                         .title(" TTED keybindings ")
                         .border_style(Style::default().fg(theme::MAUVE)),
+                ),
+            popup,
+        );
+    }
+
+    fn render_explorer_prompt(&self, frame: &mut Frame) {
+        let Some(prompt) = &self.explorer_prompt else {
+            return;
+        };
+        let area = frame.area();
+        let width = area.width.clamp(1, 64);
+        let height = area.height.clamp(1, 5);
+        let popup = Rect::new(
+            area.x + area.width.saturating_sub(width) / 2,
+            area.y + area.height.saturating_sub(height) / 2,
+            width,
+            height,
+        );
+        let title = match prompt.kind {
+            ExplorerPromptKind::NewFile => " New file ",
+            ExplorerPromptKind::NewDirectory => " New directory ",
+            ExplorerPromptKind::Rename => " Rename ",
+        };
+        let text = format!("{}\n\nEnter confirm   Esc cancel", prompt.input);
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(text)
+                .style(Style::default().bg(theme::BASE).fg(theme::TEXT))
+                .block(
+                    Block::bordered()
+                        .title(title)
+                        .border_style(Style::default().fg(theme::MAUVE)),
+                ),
+            popup,
+        );
+    }
+
+    fn render_close_prompt(&self, frame: &mut Frame) {
+        let Some(tab) = self.close_armed else {
+            return;
+        };
+        let area = frame.area();
+        let width = area.width.clamp(1, 60);
+        let height = area.height.clamp(1, 7);
+        let popup = Rect::new(
+            area.x + area.width.saturating_sub(width) / 2,
+            area.y + area.height.saturating_sub(height) / 2,
+            width,
+            height,
+        );
+        let name = self
+            .buffers
+            .get(tab)
+            .map_or_else(|| "this file".into(), Buffer::name);
+        let text = format!(
+            "{name} has unsaved changes.\n\nClose it and discard those changes?\n\nY close   N/Esc cancel"
+        );
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(text)
+                .style(Style::default().bg(theme::BASE).fg(theme::TEXT))
+                .block(
+                    Block::bordered()
+                        .title(" Unsaved file ")
+                        .border_style(Style::default().fg(theme::PEACH)),
                 ),
             popup,
         );
@@ -927,34 +1375,76 @@ impl Editor {
         })
     }
 
+    fn modal_prompt_text(&self) -> Option<String> {
+        if let Some(path) = &self.delete_confirm {
+            return Some(format!(
+                "Delete {} permanently? Y confirm  N/Esc cancel",
+                path.display()
+            ));
+        }
+        self.external_prompt_text()
+    }
+
     fn render_sidebar(&mut self, frame: &mut Frame, area: Rect) {
         let inner_height = area.height.saturating_sub(2) as usize;
+        self.explorer.ensure_visible(inner_height);
+        let active_path = self.current().path().map(PathBuf::from);
+        let start = self.explorer.scroll();
+        let selected = self.explorer.selected();
+        let focused = self.explorer.focused();
         let mut lines = Vec::with_capacity(inner_height);
-        for (index, path) in self.sidebar_entries.iter().take(inner_height).enumerate() {
-            let relative = path.strip_prefix(&self.workspace_root).unwrap_or(path);
-            let label = format!(" {}", relative.display());
-            let active = self
-                .current()
-                .path()
-                .is_some_and(|open| same_path(open, path.as_path()));
-            lines.push(Line::styled(
-                label,
-                if active {
-                    Style::default().bg(theme::SURFACE1).fg(theme::MAUVE)
+        for (index, row) in self
+            .explorer
+            .rows()
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(inner_height)
+        {
+            let marker = if row.is_dir {
+                if row.expanded {
+                    "▾"
                 } else {
-                    Style::default().fg(theme::SUBTEXT0)
-                },
-            ));
-            self.sidebar_hits
-                .push((area.y + 1 + index as u16, path.clone()));
+                    "▸"
+                }
+            } else {
+                " "
+            };
+            let name = row.path.file_name().map_or_else(
+                || row.path.display().to_string(),
+                |name| name.to_string_lossy().into(),
+            );
+            let label = format!("{}{} {name}", "  ".repeat(row.depth), marker);
+            let active = active_path
+                .as_deref()
+                .is_some_and(|open| same_path(open, &row.path));
+            let style = if focused && index == selected {
+                Style::default()
+                    .bg(theme::SURFACE1)
+                    .fg(theme::TEXT)
+                    .add_modifier(Modifier::BOLD)
+            } else if active {
+                Style::default()
+                    .fg(theme::MAUVE)
+                    .add_modifier(Modifier::BOLD)
+            } else if row.is_dir {
+                Style::default().fg(theme::BLUE)
+            } else {
+                Style::default().fg(theme::SUBTEXT0)
+            };
+            lines.push(Line::styled(label, style));
         }
         frame.render_widget(
             Paragraph::new(lines)
                 .style(Style::default().bg(theme::MANTLE))
                 .block(
                     Block::bordered()
-                        .title(" Files ")
-                        .border_style(Style::default().fg(theme::SURFACE1)),
+                        .title(if focused { " Files • " } else { " Files " })
+                        .border_style(Style::default().fg(if focused {
+                            theme::MAUVE
+                        } else {
+                            theme::SURFACE1
+                        })),
                 ),
             area,
         );
@@ -1006,36 +1496,9 @@ fn control_letter(character: char) -> Option<char> {
         .then(|| char::from_u32(value + 96).expect("ASCII control mapping"))
 }
 
-fn workspace_files(root: &std::path::Path) -> Vec<PathBuf> {
-    fn visit(directory: &std::path::Path, depth: usize, files: &mut Vec<PathBuf>) {
-        if depth > 3 || files.len() >= 250 {
-            return;
-        }
-        let Ok(entries) = fs::read_dir(directory) else {
-            return;
-        };
-        let mut entries = entries.filter_map(Result::ok).collect::<Vec<_>>();
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
-            if files.len() >= 250 {
-                break;
-            }
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with('.') || name == "target" {
-                continue;
-            }
-            let path = entry.path();
-            if path.is_dir() {
-                visit(&path, depth + 1, files);
-            } else if path.is_file() {
-                files.push(path);
-            }
-        }
-    }
-    let mut files = Vec::new();
-    visit(root, 0, &mut files);
-    files
+fn valid_entry_name(name: &str) -> bool {
+    let mut components = Path::new(name).components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
 }
 
 fn same_path(left: &std::path::Path, right: &std::path::Path) -> bool {
@@ -1052,10 +1515,12 @@ mod input_tests {
         time::{Duration, Instant},
     };
 
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind};
     use ratatui::{backend::TestBackend, Terminal};
 
-    use super::{control_letter, workspace_files, Editor};
+    use crate::explorer::Explorer;
+
+    use super::{control_letter, valid_entry_name, Editor};
 
     #[test]
     fn maps_raw_control_characters() {
@@ -1065,16 +1530,104 @@ mod input_tests {
     }
 
     #[test]
-    fn explorer_skips_hidden_and_build_directories() {
+    fn explorer_operations_require_a_single_safe_name() {
+        assert!(valid_entry_name("notes.md"));
+        assert!(valid_entry_name("folder name"));
+        assert!(!valid_entry_name(""));
+        assert!(!valid_entry_name("../outside"));
+        assert!(!valid_entry_name("nested/file"));
+        assert!(!valid_entry_name("."));
+    }
+
+    #[test]
+    fn closing_bracket_dedents_to_the_opening_level() {
+        let mut editor = Editor::new(Vec::new());
+        editor.current_mut().insert("{\n    ");
+        editor
+            .key(KeyEvent::new(KeyCode::Char('}'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(editor.current().text(), "{\n}");
+    }
+
+    #[test]
+    fn ctrl_n_creates_opens_and_focuses_a_file() {
         let root = tempfile::tempdir().unwrap();
-        fs::create_dir(root.path().join("src")).unwrap();
-        fs::create_dir(root.path().join("target")).unwrap();
-        fs::create_dir(root.path().join(".hidden")).unwrap();
-        fs::write(root.path().join("src/main.rs"), "fn main() {}").unwrap();
-        fs::write(root.path().join("target/output"), "ignored").unwrap();
-        fs::write(root.path().join(".hidden/secret"), "ignored").unwrap();
-        let files = workspace_files(root.path());
-        assert_eq!(files, vec![root.path().join("src/main.rs")]);
+        let path = root.path().join("ready.txt");
+        let mut editor = Editor::new(Vec::new());
+        editor.explorer = Explorer::new(root.path().to_path_buf());
+        editor.explorer.set_focused(true);
+        editor
+            .key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .unwrap();
+        for character in "ready.txt".chars() {
+            editor
+                .key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                .unwrap();
+        }
+        editor
+            .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(path.exists());
+        assert_eq!(editor.current().path(), Some(path.as_path()));
+        assert!(!editor.explorer.focused());
+    }
+
+    #[test]
+    fn overflowing_tabs_keep_the_active_tab_visible() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = (0..6)
+            .map(|index| {
+                let path = root.path().join(format!("document-{index}.txt"));
+                fs::write(&path, index.to_string()).unwrap();
+                path
+            })
+            .collect::<Vec<_>>();
+        let mut editor = Editor::new(paths);
+        editor.active = 5;
+        let backend = TestBackend::new(32, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| editor.render(frame)).unwrap();
+        assert!(editor.tab_start > 0);
+        assert!(editor.tab_hits.iter().any(|(_, _, tab)| *tab == 5));
+    }
+
+    #[test]
+    fn dirty_tab_close_requires_explicit_confirmation() {
+        let mut editor = Editor::new(Vec::new());
+        editor.current_mut().insert_typed("unsaved");
+        editor.request_close_tab(0);
+        assert_eq!(editor.close_armed, Some(0));
+        assert_eq!(editor.current().text(), "unsaved");
+        editor
+            .key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(editor.close_armed.is_none());
+        assert_eq!(editor.current().text(), "unsaved");
+
+        editor.request_close_tab(0);
+        editor
+            .key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+            .unwrap();
+        assert!(editor.close_armed.is_none());
+        assert_eq!(editor.current().text(), "");
+    }
+
+    #[test]
+    fn focus_mode_hides_chrome_and_restores_explorer_layout() {
+        let mut editor = Editor::new(Vec::new());
+        editor.sidebar_visible = true;
+        editor.toggle_focus_mode();
+        assert!(editor.focus_mode);
+        assert!(!editor.sidebar_visible);
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| editor.render(frame)).unwrap();
+        assert_eq!(editor.body, ratatui::layout::Rect::new(0, 0, 80, 20));
+        assert!(editor.tab_hits.is_empty());
+
+        editor.toggle_focus_mode();
+        assert!(!editor.focus_mode);
+        assert!(editor.sidebar_visible);
     }
 
     #[test]
@@ -1088,6 +1641,52 @@ mod input_tests {
             .key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL))
             .unwrap();
         assert!(quit);
+    }
+
+    #[test]
+    fn markdown_reading_view_keeps_keyboard_and_mouse_scroll() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("long.md");
+        let text = (0..80)
+            .map(|line| format!("Paragraph {line}\n\n"))
+            .collect::<String>();
+        fs::write(&path, text).unwrap();
+        let mut editor = Editor::new(vec![path]);
+        editor.markdown_reading[0] = true;
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| editor.render(frame)).unwrap();
+
+        editor
+            .key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+        terminal.draw(|frame| editor.render(frame)).unwrap();
+        assert_eq!(editor.top_line, 1);
+
+        editor
+            .handle_event(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: editor.body.x,
+                row: editor.body.y,
+                modifiers: KeyModifiers::NONE,
+            }))
+            .unwrap();
+        terminal.draw(|frame| editor.render(frame)).unwrap();
+        assert_eq!(editor.top_line, 4);
+    }
+
+    #[test]
+    fn save_as_refreshes_the_explorer() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("created.txt");
+        let mut editor = Editor::new(Vec::new());
+        editor.explorer = Explorer::new(root.path().to_path_buf());
+        editor.path_prompt = Some(path.display().to_string());
+        editor
+            .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(path.exists());
+        assert!(editor.explorer.rows().iter().any(|row| row.path == path));
     }
 
     #[test]
