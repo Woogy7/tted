@@ -4,6 +4,8 @@ use std::{
 };
 
 use ropey::Rope;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone)]
 struct Snapshot {
@@ -100,6 +102,11 @@ impl Buffer {
         let line = self.text.char_to_line(self.cursor);
         (line, self.cursor - self.text.line_to_char(line))
     }
+    pub fn cursor_screen_col(&self) -> usize {
+        let (line, _) = self.cursor_line_col();
+        let start = self.text.line_to_char(line);
+        UnicodeWidthStr::width(self.text.slice(start..self.cursor).to_string().as_str())
+    }
     pub fn current_line_prefix(&self) -> String {
         let (line, _) = self.cursor_line_col();
         let start = self.text.line_to_char(line);
@@ -190,8 +197,9 @@ impl Buffer {
         }
         self.checkpoint();
         if !self.delete_selection_raw() {
-            self.text.remove(self.cursor - 1..self.cursor);
-            self.cursor -= 1;
+            let previous = self.previous_grapheme_boundary(self.cursor);
+            self.text.remove(previous..self.cursor);
+            self.cursor = previous;
         }
         self.anchor = None;
         self.finish_edit();
@@ -242,7 +250,8 @@ impl Buffer {
         }
         self.checkpoint();
         if !self.delete_selection_raw() {
-            self.text.remove(self.cursor..self.cursor + 1);
+            let next = self.next_grapheme_boundary(self.cursor);
+            self.text.remove(self.cursor..next);
         }
         self.anchor = None;
         self.finish_edit();
@@ -286,31 +295,24 @@ impl Buffer {
     }
     pub fn move_horizontal(&mut self, delta: isize, select: bool) {
         self.begin_move(select);
-        self.cursor = self
-            .cursor
-            .saturating_add_signed(delta)
-            .min(self.text.len_chars());
+        for _ in 0..delta.unsigned_abs() {
+            self.cursor = if delta < 0 {
+                self.previous_grapheme_boundary(self.cursor)
+            } else {
+                self.next_grapheme_boundary(self.cursor)
+            };
+        }
         self.preferred_col = None;
     }
     pub fn move_vertical(&mut self, delta: isize, select: bool) {
         self.begin_move(select);
-        let (line, col) = self.cursor_line_col();
-        let wanted = *self.preferred_col.get_or_insert(col);
+        let (line, _) = self.cursor_line_col();
+        let screen_col = self.cursor_screen_col();
+        let wanted = *self.preferred_col.get_or_insert(screen_col);
         let target = line
             .saturating_add_signed(delta)
             .min(self.text.len_lines().saturating_sub(1));
-        let start = self.text.line_to_char(target);
-        let end = if target + 1 < self.text.len_lines() {
-            self.text.line_to_char(target + 1)
-        } else {
-            self.text.len_chars()
-        };
-        let content_end = if end > start && self.text.char(end - 1) == '\n' {
-            end - 1
-        } else {
-            end
-        };
-        self.cursor = start + wanted.min(content_end - start);
+        self.cursor = self.char_at_screen_col(target, wanted);
     }
     pub fn move_line_edge(&mut self, end: bool, select: bool) {
         self.begin_move(select);
@@ -339,6 +341,59 @@ impl Buffer {
             - usize::from(raw.len_chars() > 0 && raw.char(raw.len_chars() - 1) == '\n');
         self.cursor = start + col.min(max);
         self.preferred_col = None;
+    }
+
+    pub fn set_cursor_line_screen_col(&mut self, line: usize, screen_col: usize, select: bool) {
+        self.begin_move(select);
+        let line = line.min(self.text.len_lines().saturating_sub(1));
+        self.cursor = self.char_at_screen_col(line, screen_col);
+        self.preferred_col = None;
+    }
+
+    fn previous_grapheme_boundary(&self, index: usize) -> usize {
+        if index == 0 {
+            return 0;
+        }
+        let text = self.text.to_string();
+        let byte = self.text.char_to_byte(index);
+        text[..byte]
+            .grapheme_indices(true)
+            .next_back()
+            .map(|(boundary, _)| self.text.byte_to_char(boundary))
+            .unwrap_or(0)
+    }
+
+    fn next_grapheme_boundary(&self, index: usize) -> usize {
+        if index >= self.text.len_chars() {
+            return self.text.len_chars();
+        }
+        let text = self.text.to_string();
+        let byte = self.text.char_to_byte(index);
+        let length = text[byte..]
+            .graphemes(true)
+            .next()
+            .map(str::len)
+            .unwrap_or(0);
+        self.text.byte_to_char(byte + length)
+    }
+
+    fn char_at_screen_col(&self, line: usize, wanted: usize) -> usize {
+        let start = self.text.line_to_char(line);
+        let mut content = self.text.line(line).to_string();
+        while content.ends_with(['\n', '\r']) {
+            content.pop();
+        }
+        let mut screen = 0usize;
+        let mut chars = 0usize;
+        for grapheme in content.graphemes(true) {
+            let next = screen + UnicodeWidthStr::width(grapheme);
+            if next > wanted {
+                break;
+            }
+            screen = next;
+            chars += grapheme.chars().count();
+        }
+        start + chars
     }
     pub fn save(&mut self) -> io::Result<()> {
         let path = self
@@ -444,5 +499,25 @@ mod tests {
         assert_eq!(b.path(), Some(path.as_path()));
         assert_eq!(std::fs::read_to_string(path).unwrap(), "saved text");
         assert!(!b.is_dirty());
+    }
+    #[test]
+    fn movement_and_deletion_respect_graphemes() {
+        let mut b = Buffer::from_text("a👩‍💻b".into(), None, false);
+        b.move_horizontal(1, false);
+        assert_eq!(b.cursor(), 1);
+        b.move_horizontal(1, false);
+        assert_eq!(b.cursor(), 4);
+        b.backspace();
+        assert_eq!(b.text.to_string(), "ab");
+        assert_eq!(b.cursor(), 1);
+    }
+
+    #[test]
+    fn vertical_movement_preserves_screen_column() {
+        let mut b = Buffer::from_text("日本語\nabcdef".into(), None, false);
+        b.move_horizontal(2, false);
+        assert_eq!(b.cursor_screen_col(), 4);
+        b.move_vertical(1, false);
+        assert_eq!(b.cursor_line_col(), (1, 4));
     }
 }

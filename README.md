@@ -19,6 +19,7 @@ Herdr without requiring an AI agent.
 - a read-only Markdown reading view toggled independently from source editing
 - a Catppuccin Mocha-inspired editor interface
 - a collapsible, mouse-enabled workspace file explorer
+- grapheme-aware movement and deletion with terminal-cell-aware cursor placement
 
 Syntax highlighting, the file explorer, Markdown rendering, Git, LSP, and the
 agent API are intentionally deferred until the editing core is proven.

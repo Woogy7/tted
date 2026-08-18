@@ -92,8 +92,8 @@ an emoji. Move through it, select portions, edit it, undo, and save it. In
 `example.json`, extend a line beyond the terminal width to exercise horizontal
 scrolling.
 
-Please note any cursor/display mismatch around wide characters or combined emoji.
-Unicode grapheme-aware navigation is still an area being hardened.
+Expected: wide characters keep the cursor aligned, combined emoji move and delete
+as one unit, and moving vertically preserves the visual terminal column.
 
 ## 7. Syntax and Markdown reading view
 

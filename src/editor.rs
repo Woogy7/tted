@@ -22,7 +22,8 @@ use syntect::{
     highlighting::{FontStyle, Theme},
     parsing::SyntaxSet,
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::buffer::Buffer;
 use crate::theme;
@@ -173,7 +174,8 @@ impl Editor {
                     let col = self.left_col
                         + usize::from(mouse.column.saturating_sub(self.body.x + self.gutter_width));
                     let select = matches!(mouse.kind, MouseEventKind::Drag(_));
-                    self.current_mut().set_cursor_line_col(line, col, select);
+                    self.current_mut()
+                        .set_cursor_line_screen_col(line, col, select);
                     self.ensure_visible();
                 }
                 MouseEventKind::ScrollUp => self.top_line = self.top_line.saturating_sub(3),
@@ -403,7 +405,7 @@ impl Editor {
                 self.changed();
             }
             KeyCode::Tab => {
-                let (_, col) = self.current().cursor_line_col();
+                let col = self.current().cursor_screen_col();
                 let spaces = 4 - (col % 4);
                 self.current_mut().insert(&" ".repeat(spaces));
                 self.changed();
@@ -555,7 +557,8 @@ impl Editor {
         self.quit_armed = false;
     }
     fn ensure_visible(&mut self) {
-        let (line, col) = self.current().cursor_line_col();
+        let (line, _) = self.current().cursor_line_col();
+        let col = self.current().cursor_screen_col();
         let height = usize::from(self.body.height.max(1));
         let width = usize::from(self.body.width.saturating_sub(self.gutter_width).max(1));
         if line < self.top_line {
@@ -686,18 +689,23 @@ impl Editor {
                 Style::default().fg(theme::OVERLAY0).bg(theme::MANTLE),
             )];
             let mut screen_col = 0usize;
-            for (offset, ch) in raw.chars().filter(|c| *c != '\n' && *c != '\r').enumerate() {
-                let width = ch.width().unwrap_or(0).max(1);
+            let mut char_offset = 0usize;
+            let content = raw.trim_end_matches(['\n', '\r']);
+            for grapheme in content.graphemes(true) {
+                let char_count = grapheme.chars().count();
+                let width = UnicodeWidthStr::width(grapheme);
                 if screen_col + width > self.left_col {
-                    let selected = selection
-                        .is_some_and(|(a, b)| line_start + offset >= a && line_start + offset < b);
+                    let grapheme_start = line_start + char_offset;
+                    let grapheme_end = grapheme_start + char_count;
+                    let selected =
+                        selection.is_some_and(|(a, b)| grapheme_start < b && grapheme_end > a);
                     let syntax_style = syntax_styles
                         .get(visible_index)
-                        .and_then(|styles| styles.get(offset))
+                        .and_then(|styles| styles.get(char_offset))
                         .copied()
                         .unwrap_or_default();
                     spans.push(Span::styled(
-                        ch.to_string(),
+                        grapheme.to_owned(),
                         if selected {
                             syntax_style.bg(theme::SURFACE1).fg(theme::TEXT)
                         } else {
@@ -706,6 +714,7 @@ impl Editor {
                     ));
                 }
                 screen_col += width;
+                char_offset += char_count;
             }
             lines.push(Line::from(spans));
         }
@@ -716,7 +725,8 @@ impl Editor {
             self.body,
         );
 
-        let (line, col) = self.current().cursor_line_col();
+        let (line, char_col) = self.current().cursor_line_col();
+        let screen_col = self.current().cursor_screen_col();
         let path = self
             .current()
             .path()
@@ -734,7 +744,7 @@ impl Editor {
         let status = format!(
             "{left}   Ln {}, Col {}   F1 help  Ctrl+S save  Ctrl+Q quit",
             line + 1,
-            col + 1
+            char_col + 1
         );
         frame.render_widget(
             Paragraph::new(status).style(Style::default().bg(theme::SURFACE0).fg(theme::TEXT)),
@@ -749,7 +759,7 @@ impl Editor {
                 .x
                 .saturating_add(self.gutter_width)
                 .saturating_add(
-                    col.saturating_sub(self.left_col).min(usize::from(
+                    screen_col.saturating_sub(self.left_col).min(usize::from(
                         self.body
                             .width
                             .saturating_sub(self.gutter_width.saturating_add(1)),
