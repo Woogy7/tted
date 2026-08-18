@@ -361,6 +361,11 @@ Restoring Focus Mode must return the previous layout.
 
 Add a fast file picker similar in spirit to:
 
+**✅ Completed.** `Ctrl+P` opens a centered, keyboard-driven workspace picker.
+Typing performs case-insensitive fuzzy path matching, arrows and Page Up/Down
+move through results, Enter opens or focuses the file, and Esc cancels. Scanning
+uses the explorer's sensible hidden/build-directory exclusions and a file cap.
+
 ```text
 Ctrl+P
 ```

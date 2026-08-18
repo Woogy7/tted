@@ -90,6 +90,10 @@ are resolved.
 Ctrl+F opens an incremental input prompt, then selects the next exact match and
 wraps at the end of the file.
 
+Ctrl+P opens a centered Quick Open picker over workspace files. It performs
+case-insensitive fuzzy path matching, supports arrow and page navigation, and
+opens or focuses the selected file with Enter.
+
 Syntax highlighting is selected by filename and currently covers the common
 programming and markup formats in the playground, including Rust, Ruby, Python,
 JavaScript, HTML, CSS, JSON, and Markdown.
@@ -112,6 +116,7 @@ from the reading view.
 | Ctrl+Z / Ctrl+Y | Undo, redo |
 | Ctrl+S / Ctrl+Shift+S | Save, Save As |
 | Ctrl+F | Find text |
+| Ctrl+P | Fuzzy-find and open a workspace file |
 | Ctrl+W | Close the current tab |
 | Ctrl+E | Toggle and focus the file explorer |
 | Ctrl+N | Create and open a new workspace file |
@@ -142,7 +147,7 @@ LSP, Git services, and the future agent API have not been introduced yet.
 
 ## Verification
 
-The project currently has 38 passing unit tests covering buffer edits, natural
+The project currently has 41 passing unit tests covering buffer edits, natural
 undo groups, saved/dirty identity, multiline selection and paste, CRLF and final
 newline preservation, wrapped search, Save As, external modification/deletion
 flows, Markdown rendering, file-explorer filtering, raw terminal control keys,
@@ -177,6 +182,6 @@ This is still an early editor foundation. Notable limitations are:
 - configuration, custom keybindings, Git information, LSP, split panes, and the
   agent interaction API remain to be built.
 
-Phase 1 editing-core hardening and Phase 2.1–2.4's tree explorer, safe file
-operations, improved tabs, and Focus Mode are complete. Next are Quick Open and
+Phase 1 editing-core hardening and Phase 2.1–2.5's tree explorer, safe file
+operations, improved tabs, Focus Mode, and Quick Open are complete. Next are
 stronger search workflows.

@@ -158,6 +158,15 @@ open a centered dialog and require Y before being discarded.
 Expected: the normal workspace returns with the explorer visible as it was
 before entering Focus Mode.
 
+## 12. Quick Open
+
+1. Press Ctrl+P and type a few non-contiguous letters from a workspace path.
+2. Use Up/Down and Page Up/Down to move through the matches.
+3. Press Enter and confirm the selected file opens, or Esc to cancel.
+
+Expected: matching is case-insensitive, hidden/build folders are absent, and an
+already-open result focuses its existing tab.
+
 ## Deferred features
 
 These are planned but are not expected to work in the current build:

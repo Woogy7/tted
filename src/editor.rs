@@ -27,6 +27,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::buffer::{Buffer, ExternalChange};
 use crate::explorer::{Explorer, ExplorerAction};
+use crate::quick_open::QuickOpen;
 use crate::theme;
 
 #[derive(Clone, Copy)]
@@ -61,6 +62,7 @@ pub struct Editor {
     markdown_reading: Vec<bool>,
     clipboard: Option<String>,
     search_query: Option<String>,
+    quick_open: Option<QuickOpen>,
     close_armed: Option<usize>,
     path_prompt: Option<String>,
     help_visible: bool,
@@ -109,6 +111,7 @@ impl Editor {
             markdown_reading,
             clipboard: None,
             search_query: None,
+            quick_open: None,
             close_armed: None,
             path_prompt: None,
             help_visible: false,
@@ -175,6 +178,8 @@ impl Editor {
                     path.push_str(text.trim_end_matches(['\r', '\n']));
                 } else if let Some(query) = &mut self.search_query {
                     query.push_str(text.trim_end_matches(['\r', '\n']));
+                } else if let Some(picker) = &mut self.quick_open {
+                    picker.push_str(text.trim_end_matches(['\r', '\n']));
                 } else if let Some(prompt) = &mut self.explorer_prompt {
                     prompt.input.push_str(text.trim_end_matches(['\r', '\n']));
                 } else {
@@ -187,7 +192,8 @@ impl Editor {
                     || self.external_prompt.is_some()
                     || self.explorer_prompt.is_some()
                     || self.delete_confirm.is_some()
-                    || self.close_armed.is_some() => {}
+                    || self.close_armed.is_some()
+                    || self.quick_open.is_some() => {}
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::ScrollUp
                     if self
@@ -318,6 +324,9 @@ impl Editor {
         if self.search_query.is_some() {
             return self.search_key(key);
         }
+        if self.quick_open.is_some() {
+            return self.quick_open_key(key);
+        }
         if key.code == KeyCode::F(11) {
             self.toggle_focus_mode();
             return Ok(false);
@@ -362,6 +371,10 @@ impl Editor {
                 base: self.explorer.root().to_path_buf(),
                 source: None,
             });
+            return Ok(false);
+        }
+        if ctrl && key.code == KeyCode::Char('p') {
+            self.quick_open = Some(QuickOpen::new(self.explorer.root().to_path_buf()));
             return Ok(false);
         }
         if ctrl && key.code == KeyCode::Char('e') {
@@ -642,6 +655,48 @@ impl Editor {
                     .expect("search mode")
                     .push(character);
             }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn quick_open_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Esc => self.quick_open = None,
+            KeyCode::Backspace => self.quick_open.as_mut().expect("quick open").pop(),
+            KeyCode::Up => self
+                .quick_open
+                .as_mut()
+                .expect("quick open")
+                .move_selection(-1),
+            KeyCode::Down => self
+                .quick_open
+                .as_mut()
+                .expect("quick open")
+                .move_selection(1),
+            KeyCode::PageUp => self
+                .quick_open
+                .as_mut()
+                .expect("quick open")
+                .move_selection(-8),
+            KeyCode::PageDown => self
+                .quick_open
+                .as_mut()
+                .expect("quick open")
+                .move_selection(8),
+            KeyCode::Enter => {
+                let path = self.quick_open.as_ref().and_then(QuickOpen::selected_path);
+                self.quick_open = None;
+                if let Some(path) = path {
+                    self.open_path(path);
+                    self.explorer.set_focused(false);
+                }
+            }
+            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => self
+                .quick_open
+                .as_mut()
+                .expect("quick open")
+                .push(character),
             _ => {}
         }
         Ok(false)
@@ -1128,6 +1183,9 @@ impl Editor {
             if self.close_armed.is_some() {
                 self.render_close_prompt(frame);
             }
+            if self.quick_open.is_some() {
+                self.render_quick_open(frame);
+            }
             return;
         }
 
@@ -1246,6 +1304,9 @@ impl Editor {
         if self.close_armed.is_some() {
             self.render_close_prompt(frame);
         }
+        if self.quick_open.is_some() {
+            self.render_quick_open(frame);
+        }
     }
 
     fn render_help(&self, frame: &mut Frame) {
@@ -1273,6 +1334,7 @@ impl Editor {
             "  Ctrl+N                                Create and open a new file",
             "  Ctrl+S / Ctrl+Shift+S                 Save / Save As",
             "  Ctrl+F                                Find",
+            "  Ctrl+P                                Quick Open workspace file",
             "  Ctrl+W                                Close tab",
             "  Ctrl+E                                Toggle/focus file explorer",
             "  Explorer: arrows, Enter, Esc/Tab      Navigate/open/return",
@@ -1356,6 +1418,55 @@ impl Editor {
                     Block::bordered()
                         .title(" Unsaved file ")
                         .border_style(Style::default().fg(theme::PEACH)),
+                ),
+            popup,
+        );
+    }
+
+    fn render_quick_open(&self, frame: &mut Frame) {
+        let Some(picker) = &self.quick_open else {
+            return;
+        };
+        let area = frame.area();
+        let width = area.width.clamp(1, 72);
+        let height = area.height.clamp(1, 16);
+        let popup = Rect::new(
+            area.x + area.width.saturating_sub(width) / 2,
+            area.y + area.height.saturating_sub(height) / 3,
+            width,
+            height,
+        );
+        let visible_count = usize::from(height.saturating_sub(4));
+        let start = picker
+            .selected()
+            .saturating_sub(visible_count.saturating_sub(1));
+        let mut lines = vec![
+            Line::styled(
+                format!("> {}_", picker.query()),
+                Style::default()
+                    .fg(theme::TEXT)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Line::default(),
+        ];
+        for (index, path) in picker.matches().enumerate().skip(start).take(visible_count) {
+            lines.push(Line::styled(
+                format!(" {}", picker.display_path(path).display()),
+                if index == picker.selected() {
+                    Style::default().bg(theme::SURFACE1).fg(theme::MAUVE)
+                } else {
+                    Style::default().fg(theme::SUBTEXT0)
+                },
+            ));
+        }
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .style(Style::default().bg(theme::BASE))
+                .block(
+                    Block::bordered()
+                        .title(" Quick Open — Enter open, Esc cancel ")
+                        .border_style(Style::default().fg(theme::MAUVE)),
                 ),
             popup,
         );
@@ -1628,6 +1739,28 @@ mod input_tests {
         editor.toggle_focus_mode();
         assert!(!editor.focus_mode);
         assert!(editor.sidebar_visible);
+    }
+
+    #[test]
+    fn ctrl_p_fuzzy_finds_and_opens_a_workspace_file() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("feature-notes.md");
+        fs::write(&path, "# Feature").unwrap();
+        let mut editor = Editor::new(Vec::new());
+        editor.explorer = Explorer::new(root.path().to_path_buf());
+        editor
+            .key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .unwrap();
+        for character in "ftnotes".chars() {
+            editor
+                .key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                .unwrap();
+        }
+        editor
+            .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(editor.current().path(), Some(path.as_path()));
+        assert!(editor.quick_open.is_none());
     }
 
     #[test]

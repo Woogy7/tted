@@ -48,6 +48,7 @@ With no filenames TTED opens an untitled buffer; Ctrl+S then prompts for a path.
 | Ctrl+N | Create and open a new workspace file |
 | Ctrl+Shift+S | Save As |
 | Ctrl+F | Find text in the current file |
+| Ctrl+P | Fuzzy-find and open a workspace file |
 | Ctrl+W | Close tab; press twice when it has unsaved changes |
 | Ctrl+E | Toggle and focus the file explorer |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
@@ -71,6 +72,10 @@ view when they overflow and include a clickable `×` close control.
 Closing a dirty tab opens a centered confirmation dialog; Y discards and closes,
 while N or Esc returns safely to the document. F11 hides tabs, status, explorer,
 and other chrome, then restores the previous layout when pressed again.
+
+Ctrl+P opens a centered Quick Open picker. Type any ordered fragments of a
+filename or relative path, navigate matches with arrows or Page Up/Down, and
+press Enter to open the selection.
 
 When an open file changes on disk, TTED reloads it automatically if the editor
 buffer is clean. If unsaved edits could be lost, use `R` to reload the disk
