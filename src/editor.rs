@@ -1327,7 +1327,7 @@ impl Editor {
                 .max(1)
                 .to_string()
                 .len() as u16
-                + 2
+                + 3
         };
         if !self.markdown_reading[self.active] {
             self.ensure_visible();
@@ -1427,6 +1427,7 @@ impl Editor {
 
         let selection = self.current().selection();
         let cursor = self.current().cursor();
+        let current_path = self.current().path().map(PathBuf::from);
         let syntax_styles = self.highlight_visible_lines(
             self.top_line,
             (self.top_line + usize::from(self.body.height)).min(self.current().len_lines()),
@@ -1438,14 +1439,26 @@ impl Editor {
         {
             let raw = self.current().line(line_idx);
             let line_start = self.current().line_start_char(line_idx);
-            let mut spans = vec![Span::styled(
-                format!(
-                    "{:>width$} ",
-                    line_idx + 1,
-                    width = usize::from(self.gutter_width - 1)
+            let marker = current_path
+                .as_deref()
+                .and_then(|path| self.git.snapshot().line_decoration(path, line_idx + 1));
+            let marker_style = Style::default().bg(theme::MANTLE).fg(match marker {
+                Some('A') => theme::GREEN,
+                Some('D') => theme::RED,
+                Some('M') => theme::PEACH,
+                _ => theme::MANTLE,
+            });
+            let mut spans = vec![
+                Span::styled(format!("{} ", marker.unwrap_or(' ')), marker_style),
+                Span::styled(
+                    format!(
+                        "{:>width$} ",
+                        line_idx + 1,
+                        width = usize::from(self.gutter_width - 3)
+                    ),
+                    Style::default().fg(theme::OVERLAY0).bg(theme::MANTLE),
                 ),
-                Style::default().fg(theme::OVERLAY0).bg(theme::MANTLE),
-            )];
+            ];
             let mut screen_col = 0usize;
             let mut char_offset = 0usize;
             let content = raw.trim_end_matches(['\n', '\r']);

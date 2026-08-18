@@ -512,6 +512,10 @@ Keep decorations visually subtle.
 
 Show changed lines where practical:
 
+**✅ Completed.** Background zero-context diff parsing marks visible added lines
+in green, modified lines in peach, and deletion points in red beside the line
+numbers. Untracked file lines are treated as additions.
+
 - added;
 - modified;
 - deleted.

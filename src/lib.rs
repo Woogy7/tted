@@ -1,5 +1,6 @@
 pub mod buffer;
 pub mod command;
+pub mod diagnostics;
 pub mod editor;
 pub mod explorer;
 pub mod git;

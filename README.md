@@ -24,6 +24,7 @@ Herdr without requiring an AI agent.
 - smart closing-bracket dedent that aligns closers with their opening level
 - automatic clean-file reload and explicit reload/keep prompts for disk conflicts
 - background Git branch/clean-state detection and explorer file decorations
+- Git added/modified/deleted line markers in the editor gutter
 
 Git, LSP, and the agent API remain deferred while the workspace experience is
 developed further.
@@ -89,6 +90,11 @@ operations without memorizing the explorer keys.
 
 Inside a Git repository, the status bar shows the branch plus `✓` for clean or
 `*` for dirty. Explorer files use subtle `M`, `A`, `?`, and `D` decorations.
+The line-number gutter marks added lines in green, modified lines in peach, and
+deletion points in red.
+
+TTED writes lightweight diagnostic and Git-worker timing logs to
+`/tmp/tted-<pid>.log`. Set `TTED_LOG=/path/to/file.log` to choose another path.
 
 When an open file changes on disk, TTED reloads it automatically if the editor
 buffer is clean. If unsaved edits could be lost, use `R` to reload the disk

@@ -105,7 +105,9 @@ explorer item surfaces a compact context menu for its file operations.
 Git repository detection and status collection run in a short-lived background
 worker, returning immutable snapshots to the UI loop. The status bar displays
 branch and clean/dirty state; explorer files show subtle modified, added,
-untracked, or deleted decorations. Git integration is currently read-only.
+untracked, or deleted decorations. Zero-context diff hunks also produce colored
+added, modified, and deletion markers in the editor gutter. Git integration is
+currently read-only.
 
 Syntax highlighting is selected by filename and currently covers the common
 programming and markup formats in the playground, including Rust, Ruby, Python,
@@ -153,17 +155,19 @@ TTED remains a single Rust crate with deliberately small modules:
   terminal rendering, syntax styles, and workspace interactions;
 - `explorer.rs` owns the lazy workspace tree, selection, scrolling, and folder
   expansion state;
-- `git.rs` owns background repository detection and porcelain status snapshots;
+- `git.rs` owns background repository detection, status, and diff snapshots;
+- `diagnostics.rs` owns the lightweight process log;
 - `markdown.rs` converts parsed Markdown events into styled terminal lines;
 - `theme.rs` defines the shared Catppuccin-inspired interface palette;
 - `main.rs` owns terminal setup and guaranteed teardown.
 
-All editor mutations run through the single UI event loop. Background async work,
-LSP, Git services, and the future agent API have not been introduced yet.
+All editor mutations run through the single UI event loop. Git polling runs on a
+short-lived worker; LSP, general async services, and the future agent API have
+not been introduced yet.
 
 ## Verification
 
-The project currently has 50 passing unit tests covering buffer edits, natural
+The project currently has 51 passing unit tests covering buffer edits, natural
 undo groups, saved/dirty identity, multiline selection and paste, CRLF and final
 newline preservation, wrapped search, Save As, external modification/deletion
 flows, Markdown rendering, file-explorer filtering, raw terminal control keys,
@@ -195,9 +199,9 @@ This is still an early editor foundation. Notable limitations are:
 - file-change detection currently polls file metadata rather than using a
   background filesystem watcher;
 - clipboard paste from outside TTED depends on the terminal's native paste path;
-- configuration, custom keybindings, Git information, LSP, split panes, and the
+- configuration, custom keybindings, Git status views, LSP, split panes, and the
   agent interaction API remain to be built.
 
-Phases 1–3 are complete. Phase 4.1–4.2 repository detection and explorer
-decorations are also complete; editor gutter changes and status/diff views are
+Phases 1–3 are complete. Phase 4.1–4.3 repository detection, explorer
+decorations, and gutter changes are also complete; Git status/diff views are
 next.

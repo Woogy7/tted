@@ -190,12 +190,13 @@ right-click menu exposes New File, New Directory, Rename, and Delete.
 ## 15. Git awareness
 
 1. Launch TTED in a Git repository and inspect the status bar.
-2. Modify, add, and create an untracked file, waiting up to two seconds after
+2. Modify, add, and create an untracked file, waiting up to five seconds after
    each change.
 3. Open the explorer and inspect the affected file rows.
 
 Expected: the branch is shown with `✓` or `*`, editing never pauses during Git
-refreshes, and files receive subtle `M`, `A`, `?`, or `D` decorations.
+refreshes, files receive subtle `M`, `A`, `?`, or `D` decorations, and changed
+lines receive green added, peach modified, or red deletion gutter markers.
 
 ## Deferred features
 
@@ -214,3 +215,4 @@ When something feels wrong, capture:
 - terminal name and version;
 - whether it also happens outside tmux/SSH;
 - a minimal text sample, especially for Unicode issues.
+- the diagnostic log printed at startup (`/tmp/tted-<pid>.log` by default).
