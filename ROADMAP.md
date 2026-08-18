@@ -1047,6 +1047,101 @@ macOS x86_64/ARM64 binaries.
 
 ---
 
+# Phase 12 — Simple Built-In Agent Experience
+
+**Status: Planned.**
+
+## Goal
+
+Make working with a coding agent as approachable as opening chat in an ordinary
+desktop editor. TTED is aimed at people who want familiar editing—not Vim
+motions, terminal plumbing, or hand-written integration scripts.
+
+The existing structured editor API remains the safe internal foundation, but
+ordinary users should never need to understand JSON-RPC, Unix sockets, buffer
+revisions, or bridge processes.
+
+## 12.1 Agent backend manager
+
+Add a small provider-neutral backend layer that can:
+
+- detect supported locally installed agents;
+- guide the user when no supported agent is available;
+- start, monitor, restart, and stop the selected agent;
+- remember the workspace's selected backend;
+- show connection and authentication state in plain language;
+- keep child processes bounded and clean them up on exit.
+
+Start by supporting one backend exceptionally well—Codex is the initial
+candidate—then add other agents through the same interface. Do not build a
+general plugin ecosystem as part of this phase.
+
+## 12.2 Zero-friction onboarding
+
+Opening the Agent pane for the first time should present a centered, clickable
+setup flow:
+
+```text
+Choose an agent
+
+[ Codex — detected ]  [ Set up another agent ]
+```
+
+Where possible, TTED should detect existing authentication. If external login
+is required, explain the exact action and confirm automatically when it is
+complete. Configuration files and environment variables remain advanced
+options, not prerequisites.
+
+## 12.3 Familiar chat pane
+
+The Agent pane should behave like a conventional chat interface:
+
+- click or use a discoverable command to open it;
+- type a request and press Enter to send;
+- support multiline input with an obvious shortcut;
+- stream the answer;
+- show working, waiting, completed, cancelled, and failed states;
+- provide Stop, Retry, Clear, and New Conversation controls;
+- retain useful conversation context for the current workspace;
+- remain fully collapsible.
+
+The pane should receive current file, cursor, selection, diagnostics, open
+buffers, and Git diff context automatically when relevant. Users should not
+have to manually describe editor state that TTED already knows.
+
+## 12.4 Visible editor changes
+
+Agents should read and modify buffers through TTED's structured API. Changes
+must appear directly in the normal editing area, with:
+
+- clear changed-file and activity indicators;
+- clickable file references;
+- stale-revision protection;
+- a readable diff before approval;
+- per-file and whole-task Accept/Revert controls;
+- protection against reverting later human edits;
+- normal undo after accepted changes.
+
+The user remains in control. Broad or destructive file operations require an
+explicit, centered approval rather than a configuration lesson.
+
+## 12.5 Safety and accessibility
+
+- Default to workspace-scoped read/write access, never unrestricted system access.
+- Explain permissions in user-facing terms at the moment they are needed.
+- Keep keyboard and mouse paths equally complete.
+- Do not require AI for any normal editor feature.
+- Preserve responsive typing even while an agent is working.
+- Log enough backend detail for troubleshooting without exposing secrets.
+
+## Exit criteria
+
+A semi-technical user can install a supported agent, open TTED, select it in the
+Agent pane, chat, watch it edit files, review the result, and accept or revert
+the changes without using a socket, writing JSON, or learning an agent CLI.
+
+---
+
 # v1.0 Definition
 
 TTED 1.0 should mean:
@@ -1141,6 +1236,14 @@ A small number of features that feel exceptionally good is more valuable than ra
 
 # Immediate Next Work
 
-All roadmap phases are implemented for the current v0.1 scope. Next work should
-come from hands-on testing, profiling, accessibility feedback, and narrowly
-scoped bug fixes rather than adding another broad feature phase.
+Begin **Phase 12 — Simple Built-In Agent Experience** while continuing
+hands-on v0.1 testing and narrowly scoped bug fixes.
+
+Recommended order:
+
+1. Define the minimal backend lifecycle interface.
+2. Implement first-run backend detection and selection UI.
+3. Connect one supported agent end-to-end.
+4. Polish chat input, streaming, cancellation, and errors.
+5. Add per-file review plus clear Accept/Revert flows.
+6. Test the complete workflow with users who do not use Vim or agent CLIs.

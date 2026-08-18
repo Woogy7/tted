@@ -348,6 +348,7 @@ impl Editor {
                 } else {
                     self.current_mut().insert(&text.replace("\r\n", "\n"));
                     self.changed();
+                    self.ensure_visible();
                 }
             }
             Event::Mouse(_)
@@ -509,7 +510,7 @@ impl Editor {
                     let max_top = if self.markdown_reading[self.active] {
                         self.markdown_max_top()
                     } else {
-                        self.current().len_lines().saturating_sub(1)
+                        self.document_max_top()
                     };
                     self.top_line = (self.top_line + 3).min(max_top)
                 }
@@ -2314,6 +2315,12 @@ impl Editor {
             .saturating_sub(usize::from(self.body.height.max(1)))
     }
 
+    fn document_max_top(&self) -> usize {
+        self.current()
+            .len_lines()
+            .saturating_sub(usize::from(self.body.height.max(1)))
+    }
+
     fn render(&mut self, frame: &mut Frame) {
         let areas = Layout::vertical([
             Constraint::Length(1),
@@ -2375,9 +2382,6 @@ impl Editor {
                 .len() as u16
                 + 3
         };
-        if !self.markdown_reading[self.active] {
-            self.ensure_visible();
-        }
         self.tab_hits.clear();
         self.tab_close_hits.clear();
         if !self.focus_mode {
@@ -3805,6 +3809,33 @@ mod input_tests {
             .unwrap();
         terminal.draw(|frame| editor.render(frame)).unwrap();
         assert_eq!(editor.top_line, 4);
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_document_independently_of_cursor() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("long.txt");
+        let text = (0..80)
+            .map(|line| format!("Line {line}\n"))
+            .collect::<String>();
+        fs::write(&path, text).unwrap();
+        let mut editor = Editor::new(vec![path]);
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| editor.render(frame)).unwrap();
+
+        editor
+            .handle_event(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: editor.body.x,
+                row: editor.body.y,
+                modifiers: KeyModifiers::NONE,
+            }))
+            .unwrap();
+        terminal.draw(|frame| editor.render(frame)).unwrap();
+
+        assert_eq!(editor.current().cursor_line_col().0, 0);
+        assert_eq!(editor.top_line, 3);
     }
 
     #[test]
