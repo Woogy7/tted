@@ -50,6 +50,13 @@ struct ExplorerPrompt {
     source: Option<PathBuf>,
 }
 
+struct SearchState {
+    query: String,
+    replacement: String,
+    editing_replacement: bool,
+    case_sensitive: bool,
+}
+
 pub struct Editor {
     buffers: Vec<Buffer>,
     active: usize,
@@ -61,7 +68,7 @@ pub struct Editor {
     tab_start: usize,
     markdown_reading: Vec<bool>,
     clipboard: Option<String>,
-    search_query: Option<String>,
+    search: Option<SearchState>,
     quick_open: Option<QuickOpen>,
     close_armed: Option<usize>,
     path_prompt: Option<String>,
@@ -110,7 +117,7 @@ impl Editor {
             tab_start: 0,
             markdown_reading,
             clipboard: None,
-            search_query: None,
+            search: None,
             quick_open: None,
             close_armed: None,
             path_prompt: None,
@@ -176,8 +183,14 @@ impl Editor {
                     return Ok(false);
                 } else if let Some(path) = &mut self.path_prompt {
                     path.push_str(text.trim_end_matches(['\r', '\n']));
-                } else if let Some(query) = &mut self.search_query {
-                    query.push_str(text.trim_end_matches(['\r', '\n']));
+                } else if let Some(search) = &mut self.search {
+                    let target = if search.editing_replacement {
+                        &mut search.replacement
+                    } else {
+                        &mut search.query
+                    };
+                    target.push_str(text.trim_end_matches(['\r', '\n']));
+                    self.refresh_search_selection();
                 } else if let Some(picker) = &mut self.quick_open {
                     picker.push_str(text.trim_end_matches(['\r', '\n']));
                 } else if let Some(prompt) = &mut self.explorer_prompt {
@@ -193,7 +206,8 @@ impl Editor {
                     || self.explorer_prompt.is_some()
                     || self.delete_confirm.is_some()
                     || self.close_armed.is_some()
-                    || self.quick_open.is_some() => {}
+                    || self.quick_open.is_some()
+                    || self.search.is_some() => {}
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::ScrollUp
                     if self
@@ -321,7 +335,7 @@ impl Editor {
         if self.path_prompt.is_some() {
             return self.path_prompt_key(key);
         }
-        if self.search_query.is_some() {
+        if self.search.is_some() {
             return self.search_key(key);
         }
         if self.quick_open.is_some() {
@@ -466,7 +480,12 @@ impl Editor {
                     if self.markdown_reading[self.active] {
                         self.message = "Return to Markdown source before searching".into();
                     } else {
-                        self.search_query = Some(String::new());
+                        self.search = Some(SearchState {
+                            query: String::new(),
+                            replacement: String::new(),
+                            editing_replacement: false,
+                            case_sensitive: false,
+                        });
                         self.message.clear();
                     }
                 }
@@ -631,33 +650,92 @@ impl Editor {
     }
 
     fn search_key(&mut self, key: KeyEvent) -> Result<bool> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
             KeyCode::Esc => {
-                self.search_query = None;
+                self.search = None;
                 self.message = "Search cancelled".into();
             }
-            KeyCode::Enter => {
-                let query = self.search_query.clone().unwrap_or_default();
-                if self.current_mut().find_next(&query) {
-                    self.message = format!("Found: {query}");
+            KeyCode::Enter | KeyCode::F(3) => {
+                let search = self.search.as_ref().expect("search mode");
+                let query = search.query.clone();
+                let case_sensitive = search.case_sensitive;
+                if let Some((current, total)) =
+                    self.current_mut()
+                        .find_search(&query, case_sensitive, shift)
+                {
+                    self.message = format!("Match {current} of {total}");
                     self.ensure_visible();
                 } else {
                     self.message = format!("No match: {query}");
                 }
-                self.search_query = None;
             }
             KeyCode::Backspace => {
-                self.search_query.as_mut().expect("search mode").pop();
+                let search = self.search.as_mut().expect("search mode");
+                if search.editing_replacement {
+                    search.replacement.pop();
+                } else {
+                    search.query.pop();
+                }
+                self.refresh_search_selection();
             }
-            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.search_query
-                    .as_mut()
-                    .expect("search mode")
-                    .push(character);
+            KeyCode::Tab | KeyCode::BackTab => {
+                let search = self.search.as_mut().expect("search mode");
+                search.editing_replacement = !search.editing_replacement;
+            }
+            KeyCode::Char('c' | 'C') if alt => {
+                let search = self.search.as_mut().expect("search mode");
+                search.case_sensitive = !search.case_sensitive;
+                self.refresh_search_selection();
+            }
+            KeyCode::Char('r' | 'R') if ctrl => {
+                let search = self.search.as_ref().expect("search mode");
+                let query = search.query.clone();
+                let replacement = search.replacement.clone();
+                let case_sensitive = search.case_sensitive;
+                if shift {
+                    let count =
+                        self.current_mut()
+                            .replace_all_search(&query, &replacement, case_sensitive);
+                    self.message = format!("Replaced {count} matches");
+                } else if self.current_mut().replace_search_selection(
+                    &query,
+                    &replacement,
+                    case_sensitive,
+                ) {
+                    self.current_mut()
+                        .find_search(&query, case_sensitive, false);
+                    self.message = "Replaced current match".into();
+                } else {
+                    self.message = "Select a match with Enter before replacing".into();
+                }
+                self.changed();
+            }
+            KeyCode::Char(character) if !ctrl && !alt => {
+                let search = self.search.as_mut().expect("search mode");
+                if search.editing_replacement {
+                    search.replacement.push(character);
+                } else {
+                    search.query.push(character);
+                }
+                self.refresh_search_selection();
             }
             _ => {}
         }
         Ok(false)
+    }
+
+    fn refresh_search_selection(&mut self) {
+        let Some(search) = &self.search else {
+            return;
+        };
+        let query = search.query.clone();
+        let case_sensitive = search.case_sensitive;
+        if self.current_mut().refresh_search(&query, case_sensitive) {
+            self.ensure_visible();
+        }
     }
 
     fn quick_open_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -1186,6 +1264,9 @@ impl Editor {
             if self.quick_open.is_some() {
                 self.render_quick_open(frame);
             }
+            if self.search.is_some() {
+                self.render_search(frame);
+            }
             return;
         }
 
@@ -1258,8 +1339,6 @@ impl Editor {
             prompt
         } else if let Some(path) = &self.path_prompt {
             format!("Save As: {path}_   Enter save  Esc cancel")
-        } else if let Some(query) = &self.search_query {
-            format!("Find: {query}_   Enter search  Esc cancel")
         } else if self.message.is_empty() {
             path
         } else {
@@ -1307,12 +1386,15 @@ impl Editor {
         if self.quick_open.is_some() {
             self.render_quick_open(frame);
         }
+        if self.search.is_some() {
+            self.render_search(frame);
+        }
     }
 
     fn render_help(&self, frame: &mut Frame) {
         let area = frame.area();
         let width = area.width.min(72);
-        let height = area.height.min(25);
+        let height = area.height.min(29);
         let popup = Rect::new(
             area.x + area.width.saturating_sub(width) / 2,
             area.y + area.height.saturating_sub(height) / 2,
@@ -1334,6 +1416,9 @@ impl Editor {
             "  Ctrl+N                                Create and open a new file",
             "  Ctrl+S / Ctrl+Shift+S                 Save / Save As",
             "  Ctrl+F                                Find",
+            "  Search: Enter/Shift+Enter             Next/previous match",
+            "  Search: Tab, Alt+C                    Field/case toggle",
+            "  Search: Ctrl+R / Ctrl+Shift+R         Replace / replace all",
             "  Ctrl+P                                Quick Open workspace file",
             "  Ctrl+W                                Close tab",
             "  Ctrl+E                                Toggle/focus file explorer",
@@ -1466,6 +1551,65 @@ impl Editor {
                 .block(
                     Block::bordered()
                         .title(" Quick Open — Enter open, Esc cancel ")
+                        .border_style(Style::default().fg(theme::MAUVE)),
+                ),
+            popup,
+        );
+    }
+
+    fn render_search(&self, frame: &mut Frame) {
+        let Some(search) = &self.search else {
+            return;
+        };
+        let area = frame.area();
+        let width = area.width.clamp(1, 72);
+        let height = area.height.clamp(1, 10);
+        let popup = Rect::new(
+            area.x + area.width.saturating_sub(width) / 2,
+            area.y + area.height.saturating_sub(height) / 3,
+            width,
+            height,
+        );
+        let (current, total) = self
+            .current()
+            .search_status(&search.query, search.case_sensitive);
+        let query_marker = if search.editing_replacement { " " } else { ">" };
+        let replacement_marker = if search.editing_replacement { ">" } else { " " };
+        let case = if search.case_sensitive {
+            "case-sensitive"
+        } else {
+            "ignore case"
+        };
+        let lines = vec![
+            Line::styled(
+                format!("{query_marker} Find: {}", search.query),
+                Style::default().fg(theme::TEXT),
+            ),
+            Line::styled(
+                format!("{replacement_marker} Replace: {}", search.replacement),
+                Style::default().fg(theme::TEXT),
+            ),
+            Line::default(),
+            Line::styled(
+                format!("{current}/{total} matches   {case}"),
+                Style::default().fg(theme::SAPPHIRE),
+            ),
+            Line::styled(
+                "Enter/Shift+Enter next/previous   Tab switch field   Alt+C case",
+                Style::default().fg(theme::SUBTEXT0),
+            ),
+            Line::styled(
+                "Ctrl+R replace   Ctrl+Shift+R replace all   Esc close",
+                Style::default().fg(theme::SUBTEXT0),
+            ),
+        ];
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .style(Style::default().bg(theme::BASE))
+                .block(
+                    Block::bordered()
+                        .title(" Find and Replace ")
                         .border_style(Style::default().fg(theme::MAUVE)),
                 ),
             popup,
@@ -1761,6 +1905,40 @@ mod input_tests {
             .unwrap();
         assert_eq!(editor.current().path(), Some(path.as_path()));
         assert!(editor.quick_open.is_none());
+    }
+
+    #[test]
+    fn centered_search_dialog_replaces_current_and_all_matches() {
+        let mut editor = Editor::new(Vec::new());
+        editor.current_mut().insert("One one");
+        editor
+            .key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))
+            .unwrap();
+        for character in "one".chars() {
+            editor
+                .key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                .unwrap();
+        }
+        assert_eq!(editor.current().search_status("one", false), (1, 2));
+        editor
+            .key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        for character in "two".chars() {
+            editor
+                .key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE))
+                .unwrap();
+        }
+        editor
+            .key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(editor.current().text(), "two one");
+        editor
+            .key(KeyEvent::new(
+                KeyCode::Char('R'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ))
+            .unwrap();
+        assert_eq!(editor.current().text(), "two two");
     }
 
     #[test]

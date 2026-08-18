@@ -87,8 +87,10 @@ are resolved.
 
 ## Search, syntax, and Markdown
 
-Ctrl+F opens an incremental input prompt, then selects the next exact match and
-wraps at the end of the file.
+Ctrl+F opens a centered find-and-replace dialog. It selects matches as the query
+changes, shows the current position and total count, wraps next/previous
+navigation, and supports a case-sensitive toggle. Replace-current advances to
+the next result; replace-all is one undoable transaction.
 
 Ctrl+P opens a centered Quick Open picker over workspace files. It performs
 case-insensitive fuzzy path matching, supports arrow and page navigation, and
@@ -115,7 +117,7 @@ from the reading view.
 | Ctrl+C / Ctrl+X / Ctrl+V | Copy, cut, paste |
 | Ctrl+Z / Ctrl+Y | Undo, redo |
 | Ctrl+S / Ctrl+Shift+S | Save, Save As |
-| Ctrl+F | Find text |
+| Ctrl+F | Find and replace text |
 | Ctrl+P | Fuzzy-find and open a workspace file |
 | Ctrl+W | Close the current tab |
 | Ctrl+E | Toggle and focus the file explorer |
@@ -147,7 +149,7 @@ LSP, Git services, and the future agent API have not been introduced yet.
 
 ## Verification
 
-The project currently has 41 passing unit tests covering buffer edits, natural
+The project currently has 44 passing unit tests covering buffer edits, natural
 undo groups, saved/dirty identity, multiline selection and paste, CRLF and final
 newline preservation, wrapped search, Save As, external modification/deletion
 flows, Markdown rendering, file-explorer filtering, raw terminal control keys,
@@ -173,7 +175,7 @@ This is still an early editor foundation. Notable limitations are:
 - undo transactions still store full rope snapshots; grouping is natural now,
   but a compact edit-based history may eventually reduce memory use;
 - explorer filtering is not yet gitignore-aware;
-- search is exact and case-sensitive, with no live match count or replacement;
+- workspace-wide content search is not yet available;
 - syntax state is recomputed for visible rendering rather than cached by buffer
   revision;
 - file-change detection currently polls file metadata rather than using a
@@ -182,6 +184,6 @@ This is still an early editor foundation. Notable limitations are:
 - configuration, custom keybindings, Git information, LSP, split panes, and the
   agent interaction API remain to be built.
 
-Phase 1 editing-core hardening and Phase 2.1–2.5's tree explorer, safe file
-operations, improved tabs, Focus Mode, and Quick Open are complete. Next are
-stronger search workflows.
+Phase 1 editing-core hardening and Phase 2's workspace, explorer, tabs, Focus
+Mode, Quick Open, and search workflows are complete. The next roadmap phase is
+Git integration.

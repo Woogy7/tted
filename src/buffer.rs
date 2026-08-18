@@ -147,25 +147,142 @@ impl Buffer {
         (self.cursor < self.text.len_chars()).then(|| self.text.char(self.cursor))
     }
     pub fn find_next(&mut self, query: &str) -> bool {
+        self.find_search(query, true, false).is_some()
+    }
+
+    pub fn find_search(
+        &mut self,
+        query: &str,
+        case_sensitive: bool,
+        backwards: bool,
+    ) -> Option<(usize, usize)> {
+        let matches = self.search_ranges(query, case_sensitive);
+        if matches.is_empty() {
+            return None;
+        }
+        let current_start = self.selection().map_or(self.cursor, |(start, _)| start);
+        let index = if backwards {
+            matches
+                .iter()
+                .rposition(|(_, end)| *end <= current_start)
+                .unwrap_or(matches.len() - 1)
+        } else {
+            matches
+                .iter()
+                .position(|(start, _)| *start >= self.cursor)
+                .unwrap_or(0)
+        };
+        let (start, end) = matches[index];
+        self.anchor = Some(start);
+        self.cursor = end;
+        self.preferred_col = None;
+        Some((index + 1, matches.len()))
+    }
+
+    pub fn refresh_search(&mut self, query: &str, case_sensitive: bool) -> bool {
         if query.is_empty() {
+            self.anchor = None;
             return false;
         }
-        let text = self.text.to_string();
-        let cursor_byte = self.text.char_to_byte(self.cursor);
-        let found_byte = text[cursor_byte..]
-            .find(query)
-            .map(|offset| cursor_byte + offset)
-            .or_else(|| text[..cursor_byte].find(query));
-        let Some(start_byte) = found_byte else {
+        let origin = self.selection().map_or(self.cursor, |(start, _)| start);
+        let matches = self.search_ranges(query, case_sensitive);
+        let Some((start, end)) = matches
+            .iter()
+            .copied()
+            .find(|(start, _)| *start >= origin)
+            .or_else(|| matches.first().copied())
+        else {
+            self.anchor = None;
             return false;
         };
-        let end_byte = start_byte + query.len();
-        let start = self.text.byte_to_char(start_byte);
-        let end = self.text.byte_to_char(end_byte);
         self.anchor = Some(start);
         self.cursor = end;
         self.preferred_col = None;
         true
+    }
+
+    pub fn search_status(&self, query: &str, case_sensitive: bool) -> (usize, usize) {
+        let matches = self.search_ranges(query, case_sensitive);
+        let current = self.selection().and_then(|selection| {
+            matches
+                .iter()
+                .position(|range| *range == selection)
+                .map(|index| index + 1)
+        });
+        (current.unwrap_or(0), matches.len())
+    }
+
+    pub fn replace_search_selection(
+        &mut self,
+        query: &str,
+        replacement: &str,
+        case_sensitive: bool,
+    ) -> bool {
+        let Some((start, end)) = self.selection() else {
+            return false;
+        };
+        if !self
+            .search_ranges(query, case_sensitive)
+            .contains(&(start, end))
+        {
+            return false;
+        }
+        self.insert(replacement);
+        true
+    }
+
+    pub fn replace_all_search(
+        &mut self,
+        query: &str,
+        replacement: &str,
+        case_sensitive: bool,
+    ) -> usize {
+        let matches = self.search_ranges(query, case_sensitive);
+        if matches.is_empty() {
+            return 0;
+        }
+        self.checkpoint();
+        for (start, end) in matches.iter().rev() {
+            self.text.remove(*start..*end);
+            self.text.insert(*start, replacement);
+        }
+        self.cursor = matches[0].0 + replacement.chars().count();
+        self.anchor = None;
+        self.finish_edit();
+        matches.len()
+    }
+
+    fn search_ranges(&self, query: &str, case_sensitive: bool) -> Vec<(usize, usize)> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let text = self.text.to_string();
+        if case_sensitive {
+            return text
+                .match_indices(query)
+                .map(|(start, matched)| {
+                    let start = self.text.byte_to_char(start);
+                    (start, start + matched.chars().count())
+                })
+                .collect();
+        }
+        let chars = text.chars().collect::<Vec<_>>();
+        let query_chars = query.chars().count();
+        if query_chars > chars.len() {
+            return Vec::new();
+        }
+        let folded_query = query.to_lowercase();
+        (0..=chars.len().saturating_sub(query_chars))
+            .filter_map(|start| {
+                let end = start + query_chars;
+                chars[start..end]
+                    .iter()
+                    .collect::<String>()
+                    .to_lowercase()
+                    .eq(&folded_query)
+                    .then_some((start, end))
+            })
+            .collect()
     }
     pub fn selection(&self) -> Option<(usize, usize)> {
         self.anchor.filter(|a| *a != self.cursor).map(|a| {
@@ -658,6 +775,30 @@ mod tests {
         assert_eq!(b.selection(), Some((8, 11)));
         assert!(b.find_next("one"));
         assert_eq!(b.selection(), Some((0, 3)));
+    }
+
+    #[test]
+    fn search_supports_direction_counts_and_case_sensitivity() {
+        let mut buffer = Buffer::from_text("One one ONE".into(), None, false);
+        assert_eq!(buffer.find_search("one", false, false), Some((1, 3)));
+        assert_eq!(buffer.find_search("one", false, false), Some((2, 3)));
+        assert_eq!(buffer.find_search("one", false, true), Some((1, 3)));
+        assert_eq!(buffer.search_status("one", false), (1, 3));
+        assert_eq!(buffer.search_status("one", true), (0, 1));
+        assert_eq!(buffer.search_status("a very long query", false), (0, 0));
+    }
+
+    #[test]
+    fn search_replace_and_replace_all_are_undoable() {
+        let mut buffer = Buffer::from_text("one ONE one".into(), None, false);
+        buffer.find_search("one", false, false);
+        assert!(buffer.replace_search_selection("one", "two", false));
+        assert_eq!(buffer.text(), "two ONE one");
+        let replaced = buffer.replace_all_search("one", "three", false);
+        assert_eq!(replaced, 2);
+        assert_eq!(buffer.text(), "two three three");
+        buffer.undo();
+        assert_eq!(buffer.text(), "two ONE one");
     }
     #[test]
     fn save_as_assigns_path_and_writes_text() {

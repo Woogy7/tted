@@ -47,7 +47,7 @@ With no filenames TTED opens an untitled buffer; Ctrl+S then prompts for a path.
 | Ctrl+S | Save |
 | Ctrl+N | Create and open a new workspace file |
 | Ctrl+Shift+S | Save As |
-| Ctrl+F | Find text in the current file |
+| Ctrl+F | Open Find and Replace |
 | Ctrl+P | Fuzzy-find and open a workspace file |
 | Ctrl+W | Close tab; press twice when it has unsaved changes |
 | Ctrl+E | Toggle and focus the file explorer |
@@ -76,6 +76,10 @@ and other chrome, then restores the previous layout when pressed again.
 Ctrl+P opens a centered Quick Open picker. Type any ordered fragments of a
 filename or relative path, navigate matches with arrows or Page Up/Down, and
 press Enter to open the selection.
+
+Ctrl+F opens centered Find and Replace. Enter and Shift+Enter move to the next
+and previous matches, Tab switches fields, Alt+C toggles case sensitivity,
+Ctrl+R replaces the current match, and Ctrl+Shift+R replaces all matches.
 
 When an open file changes on disk, TTED reloads it automatically if the editor
 buffer is clean. If unsaved edits could be lost, use `R` to reload the disk

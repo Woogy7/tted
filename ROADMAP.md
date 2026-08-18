@@ -378,6 +378,10 @@ This becomes one of the most important keyboard workflows.
 
 Expand search to support:
 
+**✅ Completed.** `Ctrl+F` opens a centered find-and-replace dialog with live
+match position/count, next and previous navigation, case sensitivity, separate
+query/replacement fields, replace-current, and atomic replace-all with undo.
+
 - next match;
 - previous match;
 - match count;

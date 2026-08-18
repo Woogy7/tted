@@ -167,6 +167,16 @@ before entering Focus Mode.
 Expected: matching is case-insensitive, hidden/build folders are absent, and an
 already-open result focuses its existing tab.
 
+## 13. Find and Replace
+
+1. Press Ctrl+F, type text that occurs several times, and verify the live count.
+2. Use Enter and Shift+Enter for next and previous; toggle case with Alt+C.
+3. Press Tab, enter replacement text, and use Ctrl+R for one match.
+4. Use Ctrl+Shift+R to replace all remaining matches, then Ctrl+Z once.
+
+Expected: replace-all is undone as one edit and Esc closes the dialog without
+changing text.
+
 ## Deferred features
 
 These are planned but are not expected to work in the current build:
