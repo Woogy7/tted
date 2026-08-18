@@ -86,25 +86,49 @@ impl Config {
         let path = std::env::var_os("TTED_CONFIG")
             .map(PathBuf::from)
             .unwrap_or_else(|| workspace.join(".tted.toml"));
-        let Ok(source) = fs::read_to_string(&path) else {
-            return Self::default();
+        let mut config = match fs::read_to_string(&path) {
+            Ok(source) => match toml::from_str(&source) {
+                Ok(config) => config,
+                Err(error) => {
+                    diagnostics::log(&format!(
+                        "configuration error in {}: {error}",
+                        path.display()
+                    ));
+                    Self::default()
+                }
+            },
+            Err(_) => Self::default(),
         };
-        match toml::from_str(&source) {
-            Ok(config) => config,
-            Err(error) => {
-                diagnostics::log(&format!(
-                    "configuration error in {}: {error}",
-                    path.display()
-                ));
-                Self::default()
+        let overrides = workspace.join(".tted-keybindings.toml");
+        if let Ok(source) = fs::read_to_string(&overrides) {
+            match toml::from_str::<KeybindingOverrides>(&source) {
+                Ok(overrides) => config.keybindings.extend(overrides.keybindings),
+                Err(error) => diagnostics::log(&format!(
+                    "keybindings error in {}: {error}",
+                    overrides.display()
+                )),
             }
         }
+        config
+    }
+
+    pub fn save_keybindings(&self, workspace: &Path) -> std::io::Result<()> {
+        let source = toml::to_string_pretty(&KeybindingOverrides {
+            keybindings: self.keybindings.clone(),
+        })
+        .map_err(std::io::Error::other)?;
+        fs::write(workspace.join(".tted-keybindings.toml"), source)
     }
 
     pub fn language_server(&self, path: &Path) -> Option<&LanguageServerConfig> {
         let extension = path.extension()?.to_str()?;
         self.language_servers.get(extension)
     }
+}
+
+#[derive(Deserialize, Serialize)]
+struct KeybindingOverrides {
+    keybindings: HashMap<String, String>,
 }
 
 #[cfg(test)]
@@ -148,5 +172,24 @@ mod tests {
         assert_eq!(config.explorer.max_entries, 42);
         assert!(config.agent.allow_write);
         assert_eq!(config.keybindings["alt+p"], "workspace.quick_open");
+    }
+
+    #[test]
+    fn menu_keybindings_persist_separately_and_override_main_config() {
+        let workspace = tempfile::tempdir().unwrap();
+        fs::write(
+            workspace.path().join(".tted.toml"),
+            "[keybindings]\n\"ctrl+g\" = \"workspace.quick_open\"\n",
+        )
+        .unwrap();
+        let mut config = Config::load(workspace.path());
+        config
+            .keybindings
+            .insert("ctrl+g".into(), "view.toggle_agent".into());
+        config.save_keybindings(workspace.path()).unwrap();
+
+        let loaded = Config::load(workspace.path());
+        assert_eq!(loaded.keybindings["ctrl+g"], "view.toggle_agent");
+        assert!(workspace.path().join(".tted-keybindings.toml").is_file());
     }
 }

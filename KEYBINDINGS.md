@@ -9,14 +9,15 @@ Press F1 in TTED for the built-in quick reference. The most common bindings are:
 | Ctrl+C / Ctrl+X / Ctrl+V | Copy, cut, paste |
 | Ctrl+Z / Ctrl+Y | Undo, redo |
 | Ctrl+F / Ctrl+P | Find/replace, Quick Open |
-| Ctrl+Shift+P | Command Palette |
+| F2 / Ctrl+Shift+P | Command Palette (F2 works in every terminal) |
+| F3 | View and change keybindings |
 | Ctrl+E | Toggle/focus explorer |
 | Ctrl+W / Ctrl+Q | Close tab, quit |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next/previous tab |
 | Alt+Right / Alt+Left | Portable next/previous tab fallback |
 | Ctrl+Shift+M or F6 | Markdown source/reader |
 | F8 | Problems / next diagnostic |
-| F9 | Toggle built-in Agent chat |
+| Ctrl+G / F9 | Toggle built-in Agent chat |
 | F11 | Focus Mode |
 | F1 | Help |
 
@@ -28,6 +29,14 @@ All advanced actions—including Git, LSP, splits, agents, and configuration
 reload—are discoverable in the Command Palette. Custom bindings are documented
 in [CONFIGURATION.md](CONFIGURATION.md).
 
+Some terminals send Ctrl+Shift+P as Ctrl+P. In those terminals, use F2 for the
+Command Palette instead of Ctrl+Shift+P.
+
+Press F3 to open the Keybindings menu. Select an action with arrows or the
+mouse, then press Enter (or click it again) and type the new shortcut. Delete
+resets the selected custom binding. Changes are saved for the workspace.
+
 In Agent chat, Enter sends, Shift+Enter adds a line, Esc stops active work (or
 returns to the document when idle), Ctrl+R retries, Ctrl+L starts a new
-conversation, and Ctrl+K clears the visible chat.
+conversation, Ctrl+K clears the visible chat, and Tab returns focus to the
+document without closing the panel. Ctrl+G focuses the open panel again.

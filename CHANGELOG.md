@@ -6,7 +6,8 @@ All notable changes are documented here.
 
 - Conventional Unicode-aware rope editing, mouse selection, tabs, explorer,
   quick open, search/replace, syntax highlighting, and Markdown reader.
-- Catppuccin-inspired terminal UI, Focus Mode, split views, and command palette.
+- Catppuccin-inspired terminal UI, Focus Mode, split views, command palette,
+  and a persistent mouse/keyboard Keybindings menu.
 - Git status, decorations, diffs, and safe file-level write operations.
 - Configured LSP lifecycle, diagnostics, navigation, completion, and edits.
 - Permission-scoped structured agent API and integrated agent panel.

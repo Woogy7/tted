@@ -63,7 +63,8 @@ curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/Woogy7/t
 | Ctrl+Shift+S | Save As |
 | Ctrl+F | Open Find and Replace |
 | Ctrl+P | Fuzzy-find and open a workspace file |
-| Ctrl+Shift+P | Open the Command Palette |
+| F2 / Ctrl+Shift+P | Open the Command Palette |
+| F3 | View and change keybindings |
 | Ctrl+W | Close tab; press twice when it has unsaved changes |
 | Ctrl+E | Toggle and focus the file explorer |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
@@ -71,7 +72,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/Woogy7/t
 | Ctrl+Shift+Tab / Ctrl+PageUp | Previous tab |
 | Alt+Left / Alt+Right | Previous / next tab (portable fallback) |
 | Ctrl+Shift+M / F6 | Toggle Markdown source / reading view |
-| F9 | Open or close the built-in Agent chat |
+| Ctrl+G / F9 | Open or close the built-in Agent chat |
 | F11 | Toggle document-only Focus Mode |
 | Ctrl+Q | Quit; press twice when changes are unsaved |
 | F1 | Show keybindings help |
@@ -97,7 +98,8 @@ Ctrl+F opens centered Find and Replace. Enter and Shift+Enter move to the next
 and previous matches, Tab switches fields, Alt+C toggles case sensitivity,
 Ctrl+R replaces the current match, and Ctrl+Shift+R replaces all matches.
 
-Ctrl+Shift+P opens the Command Palette. Commands can be found by fuzzy title or
+F2 opens the Command Palette reliably in every terminal. Ctrl+Shift+P also works
+when the terminal distinguishes it from Ctrl+P. Commands can be found by fuzzy title or
 stable ID, then run with Enter. Right-click an explorer item to surface its file
 operations without memorizing the explorer keys.
 

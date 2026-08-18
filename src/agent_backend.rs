@@ -199,7 +199,7 @@ fn start_turn(
             "threadId":thread_id,
             "input":[{"type":"text","text":prompt}],
             "cwd":workspace,
-            "approvalPolicy":"unlessTrusted",
+            "approvalPolicy":"on-request",
             "sandboxPolicy":{
                 "type":"workspaceWrite",
                 "writableRoots":[workspace],
@@ -406,6 +406,24 @@ mod tests {
                 id: json!(42),
                 detail: "cargo test".into()
             }
+        );
+    }
+
+    #[test]
+    fn turn_uses_supported_interactive_approval_policy() {
+        let mut output = Vec::new();
+        let mut next_id = 10;
+        start_turn(
+            &mut output,
+            &PathBuf::from("/workspace"),
+            "thread-1",
+            "help".into(),
+            &mut next_id,
+        );
+        let request: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            request.pointer("/params/approvalPolicy"),
+            Some(&json!("on-request"))
         );
     }
 }

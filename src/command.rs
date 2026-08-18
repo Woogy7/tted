@@ -44,13 +44,14 @@ pub enum Command {
     AgentRefactorSelection,
     AgentWriteTests,
     AgentReviewDiff,
+    OpenKeybindings,
     ReloadConfig,
     ShowHelp,
     Quit,
 }
 
 impl Command {
-    pub const ALL: [Self; 47] = [
+    pub const ALL: [Self; 48] = [
         Self::NewFile,
         Self::Save,
         Self::SaveAs,
@@ -95,6 +96,7 @@ impl Command {
         Self::AgentRefactorSelection,
         Self::AgentWriteTests,
         Self::AgentReviewDiff,
+        Self::OpenKeybindings,
         Self::ReloadConfig,
         Self::ShowHelp,
         Self::Quit,
@@ -146,6 +148,7 @@ impl Command {
             Self::AgentRefactorSelection => "agent.refactor_selection",
             Self::AgentWriteTests => "agent.write_tests",
             Self::AgentReviewDiff => "agent.review_diff",
+            Self::OpenKeybindings => "preferences.keybindings",
             Self::ReloadConfig => "config.reload",
             Self::ShowHelp => "help.keybindings",
             Self::Quit => "app.quit",
@@ -202,6 +205,7 @@ impl Command {
             Self::AgentRefactorSelection => "Agent: Refactor Selection",
             Self::AgentWriteTests => "Agent: Write Tests",
             Self::AgentReviewDiff => "Agent: Review Diff",
+            Self::OpenKeybindings => "Preferences: Keybindings",
             Self::ReloadConfig => "Preferences: Reload Configuration",
             Self::ShowHelp => "Help: Keybindings",
             Self::Quit => "Application: Quit",

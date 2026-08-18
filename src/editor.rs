@@ -103,6 +103,11 @@ struct AgentApproval {
     detail: String,
 }
 
+struct KeybindingsMenu {
+    selected: usize,
+    capturing: bool,
+}
+
 #[derive(Clone, Debug)]
 enum BuiltinAgentStatus {
     Idle,
@@ -129,6 +134,8 @@ pub struct Editor {
     search: Option<SearchState>,
     quick_open: Option<QuickOpen>,
     command_palette: Option<CommandPalette>,
+    keybindings_menu: Option<KeybindingsMenu>,
+    keybindings_area: Option<Rect>,
     close_armed: Option<usize>,
     path_prompt: Option<String>,
     help_visible: bool,
@@ -228,6 +235,8 @@ impl Editor {
             search: None,
             quick_open: None,
             command_palette: None,
+            keybindings_menu: None,
+            keybindings_area: None,
             close_armed: None,
             path_prompt: None,
             help_visible: false,
@@ -391,6 +400,31 @@ impl Editor {
                     self.ensure_visible();
                 }
             }
+            Event::Mouse(mouse) if self.keybindings_menu.is_some() => {
+                let area = self.keybindings_area.unwrap_or(self.body);
+                let menu = self.keybindings_menu.as_mut().expect("keybindings menu");
+                match mouse.kind {
+                    MouseEventKind::ScrollUp => menu.selected = menu.selected.saturating_sub(1),
+                    MouseEventKind::ScrollDown => {
+                        menu.selected = (menu.selected + 1).min(Command::ALL.len() - 1)
+                    }
+                    MouseEventKind::Down(MouseButton::Left)
+                        if area.contains((mouse.column, mouse.row).into()) =>
+                    {
+                        let visible = usize::from(area.height.saturating_sub(5));
+                        let start = menu.selected.saturating_sub(visible.saturating_sub(1));
+                        if mouse.row > area.y && mouse.row < area.bottom().saturating_sub(3) {
+                            let selected = (start + usize::from(mouse.row - area.y - 1))
+                                .min(Command::ALL.len() - 1);
+                            menu.capturing = selected == menu.selected;
+                            menu.selected = selected;
+                        } else if mouse.row >= area.bottom().saturating_sub(3) {
+                            menu.capturing = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
             Event::Mouse(_)
                 if self.help_visible
                     || self.external_prompt.is_some()
@@ -404,195 +438,214 @@ impl Editor {
                     || self.search.is_some()
                     || self.command_palette.is_some()
                     || self.explorer_context_visible => {}
-            Event::Mouse(mouse) => match mouse.kind {
-                MouseEventKind::Down(MouseButton::Left)
-                    if self
+            Event::Mouse(mouse) => {
+                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                    && !self
                         .agent_area
-                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into())) =>
+                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into()))
                 {
-                    let area = self.agent_area.expect("Agent area checked");
-                    if self.agent_approval.is_some() {
-                        self.answer_agent_approval(mouse.column < area.x + area.width / 2);
-                        return Ok(false);
-                    }
-                    match &self.agent_backend_status {
-                        BuiltinAgentStatus::SignIn => {
-                            if let Some(backend) = &self.agent_backend {
-                                backend.send(BackendCommand::Login);
-                                self.agent_backend_status = BuiltinAgentStatus::Starting;
-                            }
+                    self.agent_panel_focused = false;
+                }
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left)
+                        if self.agent_area.is_some_and(|area| {
+                            area.contains((mouse.column, mouse.row).into())
+                        }) =>
+                    {
+                        let area = self.agent_area.expect("Agent area checked");
+                        if self.agent_approval.is_some() {
+                            self.answer_agent_approval(mouse.column < area.x + area.width / 2);
                             return Ok(false);
                         }
-                        BuiltinAgentStatus::Missing => {
-                            self.message =
+                        match &self.agent_backend_status {
+                            BuiltinAgentStatus::SignIn => {
+                                if let Some(backend) = &self.agent_backend {
+                                    backend.send(BackendCommand::Login);
+                                    self.agent_backend_status = BuiltinAgentStatus::Starting;
+                                }
+                                return Ok(false);
+                            }
+                            BuiltinAgentStatus::Missing => {
+                                self.message =
                                 "Install Codex: curl -fsSL https://chatgpt.com/codex/install.sh | sh"
                                     .into();
-                            return Ok(false);
+                                return Ok(false);
+                            }
+                            BuiltinAgentStatus::LoginCode { code, .. } => {
+                                let code = code.clone();
+                                self.copy_to_terminal_clipboard(&code)?;
+                                self.clipboard = Some(code);
+                                self.message = "Copied the Codex sign-in code".into();
+                                return Ok(false);
+                            }
+                            _ => {}
                         }
-                        BuiltinAgentStatus::LoginCode { code, .. } => {
-                            let code = code.clone();
-                            self.copy_to_terminal_clipboard(&code)?;
-                            self.clipboard = Some(code);
-                            self.message = "Copied the Codex sign-in code".into();
-                            return Ok(false);
-                        }
-                        _ => {}
-                    }
-                    if mouse.row == area.bottom().saturating_sub(2) {
-                        let relative = mouse.column.saturating_sub(area.x);
-                        if relative < 8 {
-                            self.stop_agent();
-                        } else if relative < 16 {
-                            self.retry_agent();
-                        } else if relative < 22 {
-                            self.new_agent_conversation();
-                        } else {
-                            self.clear_agent_chat();
-                        }
-                    } else if mouse.row == area.bottom().saturating_sub(1) {
-                        let relative = mouse.column.saturating_sub(area.x);
-                        if relative < 8 {
-                            self.open_agent_diff();
-                        } else if relative < 17 {
-                            self.accept_agent_changes();
-                        } else {
-                            self.revert_agent_changes();
-                        }
-                    } else if mouse.row >= area.bottom().saturating_sub(4) {
-                        self.agent_panel_focused = true;
-                    } else if let Some((_, path)) = self
-                        .agent_hits
-                        .iter()
-                        .find(|(row, _)| *row == mouse.row)
-                        .cloned()
-                    {
-                        self.open_path(path);
-                    }
-                }
-                MouseEventKind::Down(MouseButton::Left)
-                    if self
-                        .secondary_area
-                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into())) =>
-                {
-                    self.focus_next_split();
-                }
-                MouseEventKind::Down(MouseButton::Left)
-                    if self
-                        .problems_area
-                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into())) =>
-                {
-                    let area = self.problems_area.expect("Problems area checked");
-                    if mouse.row > area.y && mouse.row < area.bottom().saturating_sub(1) {
-                        let visible = usize::from(area.height.saturating_sub(2));
-                        let start = self
-                            .problems_selected
-                            .saturating_sub(visible.saturating_sub(1));
-                        self.open_problem(start + usize::from(mouse.row - area.y - 1));
-                    }
-                }
-                MouseEventKind::Down(MouseButton::Right)
-                    if self
-                        .sidebar_area
-                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into())) =>
-                {
-                    let area = self.sidebar_area.expect("sidebar area checked above");
-                    let height = usize::from(area.height.saturating_sub(2).max(1));
-                    let visible = usize::from(mouse.row.saturating_sub(area.y + 1));
-                    if mouse.row > area.y
-                        && mouse.row < area.y + area.height.saturating_sub(1)
-                        && self.explorer.scroll() + visible < self.explorer.rows().len()
-                    {
-                        self.explorer.select_visible(visible, height);
-                        self.explorer.set_focused(true);
-                        self.explorer_context_visible = true;
-                    }
-                }
-                MouseEventKind::ScrollUp
-                    if self
-                        .sidebar_area
-                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into())) =>
-                {
-                    let height = self
-                        .sidebar_area
-                        .map_or(1, |area| usize::from(area.height.saturating_sub(2).max(1)));
-                    self.explorer.scroll_by(-3, height);
-                }
-                MouseEventKind::ScrollDown
-                    if self
-                        .sidebar_area
-                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into())) =>
-                {
-                    let height = self
-                        .sidebar_area
-                        .map_or(1, |area| usize::from(area.height.saturating_sub(2).max(1)));
-                    self.explorer.scroll_by(3, height);
-                }
-                MouseEventKind::Down(MouseButton::Left)
-                    if self
-                        .sidebar_area
-                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into())) =>
-                {
-                    let area = self.sidebar_area.expect("sidebar area checked above");
-                    let height = usize::from(area.height.saturating_sub(2).max(1));
-                    let visible = usize::from(mouse.row.saturating_sub(area.y + 1));
-                    self.explorer.set_focused(true);
-                    if mouse.row > area.y
-                        && mouse.row < area.y + area.height.saturating_sub(1)
-                        && self.explorer.scroll() + visible < self.explorer.rows().len()
-                    {
-                        self.explorer.select_visible(visible, height);
-                        if let ExplorerAction::Open(path) = self.explorer.activate_selected() {
+                        if mouse.row == area.bottom().saturating_sub(2) {
+                            let relative = mouse.column.saturating_sub(area.x);
+                            if relative < 8 {
+                                self.stop_agent();
+                            } else if relative < 16 {
+                                self.retry_agent();
+                            } else if relative < 22 {
+                                self.new_agent_conversation();
+                            } else {
+                                self.clear_agent_chat();
+                            }
+                        } else if mouse.row == area.bottom().saturating_sub(1) {
+                            let relative = mouse.column.saturating_sub(area.x);
+                            if relative < 8 {
+                                self.open_agent_diff();
+                            } else if relative < 17 {
+                                self.accept_agent_changes();
+                            } else {
+                                self.revert_agent_changes();
+                            }
+                        } else if mouse.row >= area.bottom().saturating_sub(4) {
+                            self.agent_panel_focused = true;
+                        } else if let Some((_, path)) = self
+                            .agent_hits
+                            .iter()
+                            .find(|(row, _)| *row == mouse.row)
+                            .cloned()
+                        {
                             self.open_path(path);
-                            self.explorer.set_focused(false);
                         }
                     }
-                }
-                MouseEventKind::Down(MouseButton::Left)
-                    if mouse.row == self.body.y.saturating_sub(1) =>
-                {
-                    self.explorer.set_focused(false);
-                    if let Some((_, _, tab)) = self
-                        .tab_close_hits
-                        .iter()
-                        .find(|(start, end, _)| mouse.column >= *start && mouse.column < *end)
-                        .copied()
+                    MouseEventKind::Down(MouseButton::Left)
+                        if self.secondary_area.is_some_and(|area| {
+                            area.contains((mouse.column, mouse.row).into())
+                        }) =>
                     {
-                        self.request_close_tab(tab);
-                    } else if let Some((_, _, tab)) = self
-                        .tab_hits
-                        .iter()
-                        .find(|(start, end, _)| mouse.column >= *start && mouse.column < *end)
-                        .copied()
-                    {
-                        self.active = tab;
-                        self.reset_view();
+                        self.focus_next_split();
                     }
+                    MouseEventKind::Down(MouseButton::Left)
+                        if self.problems_area.is_some_and(|area| {
+                            area.contains((mouse.column, mouse.row).into())
+                        }) =>
+                    {
+                        let area = self.problems_area.expect("Problems area checked");
+                        if mouse.row > area.y && mouse.row < area.bottom().saturating_sub(1) {
+                            let visible = usize::from(area.height.saturating_sub(2));
+                            let start = self
+                                .problems_selected
+                                .saturating_sub(visible.saturating_sub(1));
+                            self.open_problem(start + usize::from(mouse.row - area.y - 1));
+                        }
+                    }
+                    MouseEventKind::Down(MouseButton::Right)
+                        if self.sidebar_area.is_some_and(|area| {
+                            area.contains((mouse.column, mouse.row).into())
+                        }) =>
+                    {
+                        let area = self.sidebar_area.expect("sidebar area checked above");
+                        let height = usize::from(area.height.saturating_sub(2).max(1));
+                        let visible = usize::from(mouse.row.saturating_sub(area.y + 1));
+                        if mouse.row > area.y
+                            && mouse.row < area.y + area.height.saturating_sub(1)
+                            && self.explorer.scroll() + visible < self.explorer.rows().len()
+                        {
+                            self.explorer.select_visible(visible, height);
+                            self.explorer.set_focused(true);
+                            self.explorer_context_visible = true;
+                        }
+                    }
+                    MouseEventKind::ScrollUp
+                        if self.sidebar_area.is_some_and(|area| {
+                            area.contains((mouse.column, mouse.row).into())
+                        }) =>
+                    {
+                        let height = self
+                            .sidebar_area
+                            .map_or(1, |area| usize::from(area.height.saturating_sub(2).max(1)));
+                        self.explorer.scroll_by(-3, height);
+                    }
+                    MouseEventKind::ScrollDown
+                        if self.sidebar_area.is_some_and(|area| {
+                            area.contains((mouse.column, mouse.row).into())
+                        }) =>
+                    {
+                        let height = self
+                            .sidebar_area
+                            .map_or(1, |area| usize::from(area.height.saturating_sub(2).max(1)));
+                        self.explorer.scroll_by(3, height);
+                    }
+                    MouseEventKind::Down(MouseButton::Left)
+                        if self.sidebar_area.is_some_and(|area| {
+                            area.contains((mouse.column, mouse.row).into())
+                        }) =>
+                    {
+                        let area = self.sidebar_area.expect("sidebar area checked above");
+                        let height = usize::from(area.height.saturating_sub(2).max(1));
+                        let visible = usize::from(mouse.row.saturating_sub(area.y + 1));
+                        self.explorer.set_focused(true);
+                        if mouse.row > area.y
+                            && mouse.row < area.y + area.height.saturating_sub(1)
+                            && self.explorer.scroll() + visible < self.explorer.rows().len()
+                        {
+                            self.explorer.select_visible(visible, height);
+                            if let ExplorerAction::Open(path) = self.explorer.activate_selected() {
+                                self.open_path(path);
+                                self.explorer.set_focused(false);
+                            }
+                        }
+                    }
+                    MouseEventKind::Down(MouseButton::Left)
+                        if mouse.row == self.body.y.saturating_sub(1) =>
+                    {
+                        self.explorer.set_focused(false);
+                        if let Some((_, _, tab)) = self
+                            .tab_close_hits
+                            .iter()
+                            .find(|(start, end, _)| mouse.column >= *start && mouse.column < *end)
+                            .copied()
+                        {
+                            self.request_close_tab(tab);
+                        } else if let Some((_, _, tab)) = self
+                            .tab_hits
+                            .iter()
+                            .find(|(start, end, _)| mouse.column >= *start && mouse.column < *end)
+                            .copied()
+                        {
+                            self.active = tab;
+                            self.reset_view();
+                        }
+                    }
+                    MouseEventKind::Down(MouseButton::Left)
+                    | MouseEventKind::Drag(MouseButton::Left)
+                        if !self.markdown_reading[self.active]
+                            && self.body.contains((mouse.column, mouse.row).into()) =>
+                    {
+                        self.agent_panel_focused = false;
+                        self.explorer.set_focused(false);
+                        let line = self.top_line + usize::from(mouse.row - self.body.y);
+                        let col = self.left_col
+                            + usize::from(
+                                mouse.column.saturating_sub(self.body.x + self.gutter_width),
+                            );
+                        let select = matches!(mouse.kind, MouseEventKind::Drag(_));
+                        self.current_mut()
+                            .set_cursor_line_screen_col(line, col, select);
+                        self.ensure_visible();
+                    }
+                    MouseEventKind::Down(MouseButton::Left)
+                        if self.markdown_reading[self.active]
+                            && self.body.contains((mouse.column, mouse.row).into()) =>
+                    {
+                        self.agent_panel_focused = false;
+                        self.explorer.set_focused(false);
+                    }
+                    MouseEventKind::ScrollUp => self.top_line = self.top_line.saturating_sub(3),
+                    MouseEventKind::ScrollDown => {
+                        let max_top = if self.markdown_reading[self.active] {
+                            self.markdown_max_top()
+                        } else {
+                            self.document_max_top()
+                        };
+                        self.top_line = (self.top_line + 3).min(max_top)
+                    }
+                    _ => {}
                 }
-                MouseEventKind::Down(MouseButton::Left)
-                | MouseEventKind::Drag(MouseButton::Left)
-                    if !self.markdown_reading[self.active]
-                        && self.body.contains((mouse.column, mouse.row).into()) =>
-                {
-                    self.explorer.set_focused(false);
-                    let line = self.top_line + usize::from(mouse.row - self.body.y);
-                    let col = self.left_col
-                        + usize::from(mouse.column.saturating_sub(self.body.x + self.gutter_width));
-                    let select = matches!(mouse.kind, MouseEventKind::Drag(_));
-                    self.current_mut()
-                        .set_cursor_line_screen_col(line, col, select);
-                    self.ensure_visible();
-                }
-                MouseEventKind::ScrollUp => self.top_line = self.top_line.saturating_sub(3),
-                MouseEventKind::ScrollDown => {
-                    let max_top = if self.markdown_reading[self.active] {
-                        self.markdown_max_top()
-                    } else {
-                        self.document_max_top()
-                    };
-                    self.top_line = (self.top_line + 3).min(max_top)
-                }
-                _ => {}
-            },
+            }
             _ => {}
         }
         Ok(false)
@@ -647,6 +700,17 @@ impl Editor {
         if self.lsp_prompt.is_some() {
             return self.lsp_prompt_key(key);
         }
+        if self.keybindings_menu.is_some() {
+            return self.keybindings_menu_key(key);
+        }
+        if let Some(command) = self
+            .config
+            .keybindings
+            .get(&key_event_name(&key))
+            .and_then(|id| Command::from_id(id))
+        {
+            return self.execute_command(command);
+        }
         if self.help_visible {
             if matches!(key.code, KeyCode::Esc | KeyCode::F(1)) {
                 self.help_visible = false;
@@ -655,6 +719,13 @@ impl Editor {
         }
         if key.code == KeyCode::F(1) {
             return self.execute_command(Command::ShowHelp);
+        }
+        if key.code == KeyCode::F(2) {
+            self.command_palette = Some(CommandPalette::new());
+            return Ok(false);
+        }
+        if key.code == KeyCode::F(3) {
+            return self.execute_command(Command::OpenKeybindings);
         }
         if key.code == KeyCode::F(8) {
             self.problems_visible = true;
@@ -696,13 +767,12 @@ impl Editor {
         if self.command_palette.is_some() {
             return self.command_palette_key(key);
         }
-        if let Some(command) = self
-            .config
-            .keybindings
-            .get(&key_event_name(&key))
-            .and_then(|id| Command::from_id(id))
-        {
-            return self.execute_command(command);
+        if ctrl && matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G')) {
+            if self.agent_panel_visible {
+                self.agent_panel_focused = true;
+                return Ok(false);
+            }
+            return self.execute_command(Command::ToggleAgentPanel);
         }
         if ctrl && shift && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P')) {
             self.command_palette = Some(CommandPalette::new());
@@ -1103,6 +1173,93 @@ impl Editor {
         Ok(false)
     }
 
+    fn keybindings_menu_key(&mut self, key: KeyEvent) -> Result<bool> {
+        let capturing = self
+            .keybindings_menu
+            .as_ref()
+            .is_some_and(|menu| menu.capturing);
+        if capturing {
+            if key.code == KeyCode::Esc {
+                if let Some(menu) = &mut self.keybindings_menu {
+                    menu.capturing = false;
+                }
+                return Ok(false);
+            }
+            let name = key_event_name(&key);
+            if name.is_empty()
+                || matches!(key.code, KeyCode::Char(_))
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+            {
+                self.message = "Use Ctrl, Alt, or a function/navigation key for shortcuts".into();
+                return Ok(false);
+            }
+            let selected = self
+                .keybindings_menu
+                .as_ref()
+                .map_or(0, |menu| menu.selected);
+            let command = Command::ALL[selected.min(Command::ALL.len() - 1)];
+            self.config
+                .keybindings
+                .retain(|_, command_id| command_id != command.id());
+            let replaced = self
+                .config
+                .keybindings
+                .insert(name.clone(), command.id().into());
+            self.persist_keybindings();
+            if let Some(menu) = &mut self.keybindings_menu {
+                menu.capturing = false;
+            }
+            self.message = if replaced.is_some() {
+                format!("Assigned {name}; replaced its previous action")
+            } else {
+                format!("Assigned {name} to {}", command.title())
+            };
+            return Ok(false);
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::F(3) => self.keybindings_menu = None,
+            KeyCode::Up => {
+                if let Some(menu) = &mut self.keybindings_menu {
+                    menu.selected = menu.selected.saturating_sub(1);
+                }
+            }
+            KeyCode::Down => {
+                if let Some(menu) = &mut self.keybindings_menu {
+                    menu.selected = (menu.selected + 1).min(Command::ALL.len() - 1);
+                }
+            }
+            KeyCode::Home => self.keybindings_menu.as_mut().expect("menu").selected = 0,
+            KeyCode::End => {
+                self.keybindings_menu.as_mut().expect("menu").selected = Command::ALL.len() - 1
+            }
+            KeyCode::Enter => self.keybindings_menu.as_mut().expect("menu").capturing = true,
+            KeyCode::Backspace | KeyCode::Delete => {
+                let selected = self.keybindings_menu.as_ref().expect("menu").selected;
+                let command = Command::ALL[selected];
+                let before = self.config.keybindings.len();
+                self.config
+                    .keybindings
+                    .retain(|_, command_id| command_id != command.id());
+                if self.config.keybindings.len() != before {
+                    self.persist_keybindings();
+                    self.message = format!("Reset {} to its default", command.title());
+                } else {
+                    self.message = "This action has no custom shortcut".into();
+                }
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn persist_keybindings(&mut self) {
+        if let Err(error) = self.config.save_keybindings(self.explorer.root()) {
+            self.message = format!("Could not save keybindings: {error}");
+        }
+    }
+
     fn command_palette_key(&mut self, key: KeyEvent) -> Result<bool> {
         match key.code {
             KeyCode::Esc => self.command_palette = None,
@@ -1361,6 +1518,13 @@ impl Editor {
             }
             Command::AgentReviewDiff => {
                 self.enqueue_agent_prompt("Review the current Git diff".into())
+            }
+            Command::OpenKeybindings => {
+                self.keybindings_menu = Some(KeybindingsMenu {
+                    selected: 0,
+                    capturing: false,
+                });
+                self.message.clear();
             }
             Command::ReloadConfig => {
                 let root = self.explorer.root().to_path_buf();
@@ -2298,6 +2462,8 @@ impl Editor {
             return Ok(false);
         }
         match key.code {
+            KeyCode::Tab => self.agent_panel_focused = false,
+            KeyCode::Char('g') | KeyCode::Char('G') if ctrl => self.agent_panel_focused = false,
             KeyCode::Esc if matches!(self.agent_backend_status, BuiltinAgentStatus::Working) => {
                 self.stop_agent()
             }
@@ -2331,14 +2497,47 @@ impl Editor {
     }
 
     fn enqueue_agent_prompt(&mut self, prompt: String) {
-        if self.buffers.iter().any(Buffer::is_dirty) {
+        if let Some(index) = self
+            .buffers
+            .iter()
+            .position(|buffer| buffer.is_dirty() && buffer.path().is_none())
+        {
+            self.active = index;
+            self.update_active_split_buffer();
             self.agent_input = prompt;
             self.agent_messages.push(AgentMessage {
-                text: "! Save your open changes before sending this request".into(),
+                text: "! Give the untitled file a name, then send again".into(),
                 path: None,
             });
-            self.message = "Save open changes before starting Codex".into();
+            self.agent_panel_focused = false;
+            self.path_prompt = Some(String::new());
+            self.message = "Name the untitled file so Codex can work with it".into();
             return;
+        }
+        let mut saved = Vec::new();
+        for buffer in self.buffers.iter_mut().filter(|buffer| buffer.is_dirty()) {
+            let name = buffer.name();
+            if let Err(error) = buffer.save() {
+                self.agent_input = prompt;
+                self.agent_messages.push(AgentMessage {
+                    text: format!("! Could not synchronize {name}: {error}"),
+                    path: None,
+                });
+                self.message = format!("Could not save {name} for Codex");
+                return;
+            }
+            if let Some(path) = buffer.path() {
+                saved.push(path.to_path_buf());
+            }
+        }
+        if !saved.is_empty() {
+            self.explorer.refresh();
+            self.git.request_refresh();
+            if let Some(lsp) = &self.lsp {
+                for path in &saved {
+                    lsp.save(path.clone());
+                }
+            }
         }
         self.ensure_agent_backend();
         self.agent_messages.push(AgentMessage {
@@ -2356,7 +2555,11 @@ impl Editor {
             self.agent_prompts.push_back(prompt);
         }
         self.agent_panel_visible = true;
-        self.message = "Sent to Codex".into();
+        self.message = if saved.is_empty() {
+            "Sent to Codex".into()
+        } else {
+            format!("Saved {} open file(s) and sent to Codex", saved.len())
+        };
     }
 
     fn ensure_agent_backend(&mut self) {
@@ -2823,6 +3026,7 @@ impl Editor {
             self.render_agent_panel(frame);
             self.render_lsp_popups(frame);
             self.render_git_prompts(frame);
+            self.render_keybindings_menu(frame);
             return;
         }
 
@@ -2940,7 +3144,7 @@ impl Editor {
             .as_ref()
             .map_or(String::new(), |_| "   Agent API".into());
         let status = format!(
-            "{left}   Ln {}, Col {}{git}{lsp}{agent}   F1 help  F9 agent  Ctrl+S save  Ctrl+Q quit",
+            "{left}   Ln {}, Col {}{git}{lsp}{agent}   F1 help  Ctrl+G agent  Ctrl+S save  Ctrl+Q quit",
             line + 1,
             char_col + 1
         );
@@ -2994,6 +3198,7 @@ impl Editor {
         self.render_agent_panel(frame);
         self.render_lsp_popups(frame);
         self.render_git_prompts(frame);
+        self.render_keybindings_menu(frame);
     }
 
     fn render_help(&self, frame: &mut Frame) {
@@ -3025,13 +3230,14 @@ impl Editor {
             "  Search: Tab, Alt+C                    Field/case toggle",
             "  Search: Ctrl+R / Ctrl+Shift+R         Replace / replace all",
             "  Ctrl+P                                Quick Open workspace file",
-            "  Ctrl+Shift+P                          Command Palette",
+            "  F2 / Ctrl+Shift+P                     Command Palette",
+            "  F3                                    Change keybindings",
             "  Ctrl+W                                Close tab",
             "  Ctrl+E                                Toggle/focus file explorer",
             "  Explorer: arrows, Enter, Esc/Tab      Navigate/open/return",
             "  Explorer: N / Shift+N / R / D         New file/dir, rename/delete",
             "  Ctrl+Shift+M / F6                     Markdown reading view",
-            "  F9                                    Toggle Agent chat",
+            "  Ctrl+G / F9                           Toggle Agent chat",
             "  F11                                   Toggle Focus Mode",
             "  Ctrl+Q                                Quit",
             "",
@@ -3221,7 +3427,7 @@ impl Editor {
             sections[0],
         );
         let input = format!(
-            "> {}{}\nEnter send   Shift+Enter newline",
+            "> {}{}\nEnter send   Shift+Enter newline   Tab document",
             self.agent_input,
             if self.agent_panel_focused { "_" } else { "" }
         );
@@ -3655,6 +3861,58 @@ impl Editor {
         );
     }
 
+    fn render_keybindings_menu(&mut self, frame: &mut Frame) {
+        let Some(menu) = &self.keybindings_menu else {
+            return;
+        };
+        let area = frame.area();
+        let popup = centered_rect(area, area.width.min(76), area.height.min(24));
+        self.keybindings_area = Some(popup);
+        let visible = usize::from(popup.height.saturating_sub(5));
+        let start = menu.selected.saturating_sub(visible.saturating_sub(1));
+        let mut lines = Vec::new();
+        for (index, command) in Command::ALL.iter().enumerate().skip(start).take(visible) {
+            let custom = self
+                .config
+                .keybindings
+                .iter()
+                .find_map(|(key, id)| (id == command.id()).then_some(key.as_str()));
+            let binding = custom.unwrap_or_else(|| default_binding(*command));
+            lines.push(Line::styled(
+                format!(" {:<45} {:>20}", command.title(), binding),
+                if index == menu.selected {
+                    Style::default().bg(theme::SURFACE1).fg(theme::MAUVE)
+                } else {
+                    Style::default().fg(theme::SUBTEXT0)
+                },
+            ));
+        }
+        lines.push(Line::default());
+        lines.push(Line::styled(
+            if menu.capturing {
+                " Press the new shortcut · Esc cancels"
+            } else {
+                " ↑↓ select · Enter change · Delete reset · Esc close"
+            },
+            Style::default().fg(if menu.capturing {
+                theme::PEACH
+            } else {
+                theme::TEXT
+            }),
+        ));
+        frame.render_widget(Clear, popup);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .style(Style::default().bg(theme::BASE))
+                .block(
+                    Block::bordered()
+                        .title(" Keybindings — saved for this workspace ")
+                        .border_style(Style::default().fg(theme::MAUVE)),
+                ),
+            popup,
+        );
+    }
+
     fn render_explorer_context(&self, frame: &mut Frame) {
         let area = frame.area();
         let width = area.width.clamp(1, 44);
@@ -3871,6 +4129,27 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
         width,
         height,
     )
+}
+
+fn default_binding(command: Command) -> &'static str {
+    match command {
+        Command::NewFile => "ctrl+n",
+        Command::Save => "ctrl+s",
+        Command::SaveAs => "ctrl+shift+s",
+        Command::CloseFile => "ctrl+w",
+        Command::QuickOpen => "ctrl+p",
+        Command::ToggleExplorer => "ctrl+e",
+        Command::FindReplace => "ctrl+f",
+        Command::NextTab => "ctrl+tab",
+        Command::PreviousTab => "ctrl+shift+tab",
+        Command::ToggleMarkdownReader => "f6",
+        Command::ToggleProblems => "f8",
+        Command::ToggleAgentPanel => "ctrl+g / f9",
+        Command::OpenKeybindings => "f3",
+        Command::ShowHelp => "f1",
+        Command::Quit => "ctrl+q",
+        _ => "—",
+    }
 }
 
 fn key_event_name(key: &KeyEvent) -> String {
@@ -4423,6 +4702,52 @@ mod input_tests {
             .execute_agent_method("agent.respond", &json!({"text":"…done","append":true}))
             .unwrap();
         assert_eq!(editor.agent_messages.last().unwrap().text, "Working…done");
+    }
+
+    #[test]
+    fn agent_prompt_synchronizes_dirty_named_buffers() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("live.rs");
+        fs::write(&path, "old").unwrap();
+        let mut editor = Editor::new(vec![path.clone()]);
+        editor.current_mut().insert_typed("live edit");
+
+        editor.enqueue_agent_prompt("work with this file".into());
+
+        assert_eq!(fs::read_to_string(path).unwrap(), "live editold");
+        assert!(!editor.current().is_dirty());
+        assert_eq!(editor.agent_prompts.back().unwrap(), "work with this file");
+    }
+
+    #[test]
+    fn agent_prompt_requests_a_name_only_for_dirty_untitled_buffer() {
+        let mut editor = Editor::new(Vec::new());
+        editor.current_mut().insert_typed("live edit");
+        editor.agent_input = "help".into();
+
+        let prompt = std::mem::take(&mut editor.agent_input);
+        editor.enqueue_agent_prompt(prompt);
+
+        assert!(editor.path_prompt.is_some());
+        assert_eq!(editor.agent_input, "help");
+        assert!(editor.agent_prompts.is_empty());
+    }
+
+    #[test]
+    fn open_agent_panel_can_yield_focus_to_document() {
+        let mut editor = Editor::new(Vec::new());
+        editor.agent_panel_visible = true;
+        editor.agent_panel_focused = true;
+        editor
+            .agent_panel_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+            .unwrap();
+        assert!(editor.agent_panel_visible);
+        assert!(!editor.agent_panel_focused);
+
+        editor
+            .key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(editor.current().text(), "x");
     }
 
     #[test]

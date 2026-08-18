@@ -18,6 +18,11 @@ controls syntax colors.
 
 ## Keybindings
 
+Press F3 for the centered Keybindings menu. Choose an action, press Enter, then
+press the desired shortcut. Delete resets a custom shortcut. TTED stores menu
+changes in `.tted-keybindings.toml` in the workspace so it does not rewrite the
+main configuration file. Custom assignments take precedence over defaults.
+
 The `[keybindings]` table maps normalized key names to command IDs:
 
 ```toml
