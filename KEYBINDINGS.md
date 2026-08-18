@@ -16,6 +16,7 @@ Press F1 in TTED for the built-in quick reference. The most common bindings are:
 | Alt+Right / Alt+Left | Portable next/previous tab fallback |
 | Ctrl+Shift+M or F6 | Markdown source/reader |
 | F8 | Problems / next diagnostic |
+| F9 | Toggle built-in Agent chat |
 | F11 | Focus Mode |
 | F1 | Help |
 
@@ -26,3 +27,7 @@ and D requests deletion. Esc or Tab returns to the document.
 All advanced actions—including Git, LSP, splits, agents, and configuration
 reload—are discoverable in the Command Palette. Custom bindings are documented
 in [CONFIGURATION.md](CONFIGURATION.md).
+
+In Agent chat, Enter sends, Shift+Enter adds a line, Esc stops active work (or
+returns to the document when idle), Ctrl+R retries, Ctrl+L starts a new
+conversation, and Ctrl+K clears the visible chat.

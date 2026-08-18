@@ -71,6 +71,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/Woogy7/t
 | Ctrl+Shift+Tab / Ctrl+PageUp | Previous tab |
 | Alt+Left / Alt+Right | Previous / next tab (portable fallback) |
 | Ctrl+Shift+M / F6 | Toggle Markdown source / reading view |
+| F9 | Open or close the built-in Agent chat |
 | F11 | Toggle document-only Focus Mode |
 | Ctrl+Q | Quit; press twice when changes are unsaved |
 | F1 | Show keybindings help |
@@ -133,10 +134,13 @@ It uses stable buffer IDs and revision-checked JSON-RPC edits rather than
 terminal scraping or simulated keys. Mutation permissions default off; see
 `AGENT_API.md` and `.tted.example.toml`.
 
-The Command Palette opens a collapsible Agent panel with prompt input, streamed
-activity, clickable file references, View Diff, Accept, and Revert controls.
-Context commands can explain/refactor a selection, request tests, or review the
-current diff without coupling TTED to an AI provider.
+F9 opens a collapsible, conventional Agent chat. TTED automatically detects an
+installed Codex CLI, reuses its sign-in, or presents a clickable device-code
+setup. Type a request and press Enter; Shift+Enter inserts a newline. Responses,
+commands, edits, completion, and errors stream into the panel. Stop, Retry, New,
+Clear, Diff, Accept, and Revert are clickable. Codex is confined to the current
+workspace, and Revert refuses to overwrite later human changes. The existing
+provider-neutral socket API remains available for advanced/custom backends.
 
 When an open file changes on disk, TTED reloads it automatically if the editor
 buffer is clean. If unsaved edits could be lost, use `R` to reload the disk
@@ -153,5 +157,6 @@ cargo build --release
 ```
 
 Documentation: [keybindings](KEYBINDINGS.md), [configuration](CONFIGURATION.md),
-[architecture](ARCHITECTURE.md), [agent API](AGENT_API.md),
+[architecture](ARCHITECTURE.md), [Agent chat](AGENT_CHAT.md),
+[agent API](AGENT_API.md),
 [contributing](CONTRIBUTING.md), and [changelog](CHANGELOG.md).

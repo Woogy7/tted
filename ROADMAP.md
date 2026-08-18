@@ -1049,7 +1049,13 @@ macOS x86_64/ARM64 binaries.
 
 # Phase 12 — Simple Built-In Agent Experience
 
-**Status: Planned.**
+**Status: ✅ Complete for the initial Codex backend.** F9 opens a conventional
+chat pane that detects and starts Codex, checks existing authentication, guides
+device-code sign-in, preserves a conversation thread, streams replies/activity
+and diffs, refreshes edited files, and provides Stop, Retry, New, Clear, Diff,
+Accept, and guarded Revert controls.
+Potentially risky commands and file operations pause in a centered, plain-language
+Allow/Decline dialog and are never approved silently.
 
 ## Goal
 
@@ -1236,14 +1242,6 @@ A small number of features that feel exceptionally good is more valuable than ra
 
 # Immediate Next Work
 
-Begin **Phase 12 — Simple Built-In Agent Experience** while continuing
-hands-on v0.1 testing and narrowly scoped bug fixes.
-
-Recommended order:
-
-1. Define the minimal backend lifecycle interface.
-2. Implement first-run backend detection and selection UI.
-3. Connect one supported agent end-to-end.
-4. Polish chat input, streaming, cancellation, and errors.
-5. Add per-file review plus clear Accept/Revert flows.
-6. Test the complete workflow with users who do not use Vim or agent CLIs.
+Phase 12 is implemented for the initial Codex backend. Continue hands-on testing
+of first-run sign-in, longer conversations, edits, interruption, and review.
+Use that feedback before adding another provider or widening permissions.

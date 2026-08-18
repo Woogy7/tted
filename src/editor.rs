@@ -28,6 +28,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::agent::{AgentRequest, AgentServer};
+use crate::agent_backend::{AgentBackend, BackendCommand, BackendEvent};
 use crate::buffer::{Buffer, ExternalChange};
 use crate::command::{Command, CommandPalette};
 use crate::config::Config;
@@ -92,6 +93,28 @@ struct AgentMessage {
     path: Option<PathBuf>,
 }
 
+struct AgentDiskChange {
+    before: Option<Vec<u8>>,
+    after: Option<Vec<u8>>,
+}
+
+struct AgentApproval {
+    id: Value,
+    detail: String,
+}
+
+#[derive(Clone, Debug)]
+enum BuiltinAgentStatus {
+    Idle,
+    Starting,
+    SignIn,
+    Ready,
+    Working,
+    LoginCode { url: String, code: String },
+    Missing,
+    Error(String),
+}
+
 pub struct Editor {
     buffers: Vec<Buffer>,
     active: usize,
@@ -137,6 +160,14 @@ pub struct Editor {
     split: Option<SplitState>,
     secondary_area: Option<Rect>,
     agent: Option<AgentServer>,
+    agent_backend: Option<AgentBackend>,
+    agent_backend_status: BuiltinAgentStatus,
+    agent_last_prompt: Option<String>,
+    agent_turn_diff: String,
+    agent_stream_message: Option<usize>,
+    agent_disk_before: HashMap<PathBuf, Vec<u8>>,
+    agent_disk_changes: HashMap<PathBuf, AgentDiskChange>,
+    agent_approval: Option<AgentApproval>,
     agent_activity: Vec<String>,
     agent_panel_visible: bool,
     agent_panel_focused: bool,
@@ -233,6 +264,14 @@ impl Editor {
             split: None,
             secondary_area: None,
             agent,
+            agent_backend: None,
+            agent_backend_status: BuiltinAgentStatus::Idle,
+            agent_last_prompt: None,
+            agent_turn_diff: String::new(),
+            agent_stream_message: None,
+            agent_disk_before: HashMap::new(),
+            agent_disk_changes: HashMap::new(),
+            agent_approval: None,
             agent_activity: Vec::new(),
             agent_panel_visible: false,
             agent_panel_focused: false,
@@ -295,6 +334,7 @@ impl Editor {
                 self.sync_lsp_change();
             }
             redraw |= self.poll_lsp();
+            redraw |= self.poll_agent_backend();
             while let Some(request) = self.agent.as_ref().and_then(AgentServer::try_recv) {
                 self.handle_agent_request(request);
                 redraw = true;
@@ -371,12 +411,49 @@ impl Editor {
                         .is_some_and(|area| area.contains((mouse.column, mouse.row).into())) =>
                 {
                     let area = self.agent_area.expect("Agent area checked");
-                    if mouse.row == area.bottom().saturating_sub(1) {
+                    if self.agent_approval.is_some() {
+                        self.answer_agent_approval(mouse.column < area.x + area.width / 2);
+                        return Ok(false);
+                    }
+                    match &self.agent_backend_status {
+                        BuiltinAgentStatus::SignIn => {
+                            if let Some(backend) = &self.agent_backend {
+                                backend.send(BackendCommand::Login);
+                                self.agent_backend_status = BuiltinAgentStatus::Starting;
+                            }
+                            return Ok(false);
+                        }
+                        BuiltinAgentStatus::Missing => {
+                            self.message =
+                                "Install Codex: curl -fsSL https://chatgpt.com/codex/install.sh | sh"
+                                    .into();
+                            return Ok(false);
+                        }
+                        BuiltinAgentStatus::LoginCode { code, .. } => {
+                            let code = code.clone();
+                            self.copy_to_terminal_clipboard(&code)?;
+                            self.clipboard = Some(code);
+                            self.message = "Copied the Codex sign-in code".into();
+                            return Ok(false);
+                        }
+                        _ => {}
+                    }
+                    if mouse.row == area.bottom().saturating_sub(2) {
                         let relative = mouse.column.saturating_sub(area.x);
-                        if relative < 13 {
-                            let text = self.git.snapshot().workspace_diff();
-                            self.open_read_only("Agent Changes.diff", text);
+                        if relative < 8 {
+                            self.stop_agent();
+                        } else if relative < 16 {
+                            self.retry_agent();
                         } else if relative < 22 {
+                            self.new_agent_conversation();
+                        } else {
+                            self.clear_agent_chat();
+                        }
+                    } else if mouse.row == area.bottom().saturating_sub(1) {
+                        let relative = mouse.column.saturating_sub(area.x);
+                        if relative < 8 {
+                            self.open_agent_diff();
+                        } else if relative < 17 {
                             self.accept_agent_changes();
                         } else {
                             self.revert_agent_changes();
@@ -582,6 +659,9 @@ impl Editor {
         if key.code == KeyCode::F(8) {
             self.problems_visible = true;
             return self.jump_to_problem(1);
+        }
+        if key.code == KeyCode::F(9) {
+            return self.execute_command(Command::ToggleAgentPanel);
         }
         if self.external_prompt.is_some() {
             return self.external_prompt_key(key);
@@ -1258,16 +1338,19 @@ impl Editor {
             Command::ToggleAgentPanel => {
                 self.agent_panel_visible = !self.agent_panel_visible;
                 self.agent_panel_focused = self.agent_panel_visible;
+                if self.agent_panel_visible {
+                    self.ensure_agent_backend();
+                }
             }
             Command::AgentViewDiff => {
-                let text = self.git.snapshot().workspace_diff();
-                self.open_read_only("Agent Changes.diff", text);
+                self.open_agent_diff();
             }
             Command::AgentAccept => self.accept_agent_changes(),
             Command::AgentRevert => self.revert_agent_changes(),
             Command::AgentAsk => {
                 self.agent_panel_visible = true;
                 self.agent_panel_focused = true;
+                self.ensure_agent_backend();
             }
             Command::AgentExplainSelection => self.enqueue_context_prompt("Explain this selection"),
             Command::AgentRefactorSelection => {
@@ -2200,12 +2283,40 @@ impl Editor {
     }
 
     fn agent_panel_key(&mut self, key: KeyEvent) -> Result<bool> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        if self.agent_approval.is_some() {
+            match key.code {
+                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.answer_agent_approval(true)
+                }
+                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                    self.answer_agent_approval(false)
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
         match key.code {
+            KeyCode::Esc if matches!(self.agent_backend_status, BuiltinAgentStatus::Working) => {
+                self.stop_agent()
+            }
             KeyCode::Esc => self.agent_panel_focused = false,
+            KeyCode::Char('l') if ctrl => self.new_agent_conversation(),
+            KeyCode::Char('r') if ctrl => self.retry_agent(),
+            KeyCode::Char('k') if ctrl => self.clear_agent_chat(),
+            KeyCode::Enter if shift => self.agent_input.push('\n'),
             KeyCode::Backspace => {
                 self.agent_input.pop();
             }
             KeyCode::Enter => {
+                if matches!(self.agent_backend_status, BuiltinAgentStatus::SignIn) {
+                    if let Some(backend) = &self.agent_backend {
+                        backend.send(BackendCommand::Login);
+                        self.agent_backend_status = BuiltinAgentStatus::Starting;
+                    }
+                    return Ok(false);
+                }
                 let prompt = std::mem::take(&mut self.agent_input);
                 if !prompt.trim().is_empty() {
                     self.enqueue_agent_prompt(prompt);
@@ -2220,13 +2331,226 @@ impl Editor {
     }
 
     fn enqueue_agent_prompt(&mut self, prompt: String) {
+        if self.buffers.iter().any(Buffer::is_dirty) {
+            self.agent_input = prompt;
+            self.agent_messages.push(AgentMessage {
+                text: "! Save your open changes before sending this request".into(),
+                path: None,
+            });
+            self.message = "Save open changes before starting Codex".into();
+            return;
+        }
+        self.ensure_agent_backend();
         self.agent_messages.push(AgentMessage {
             text: format!("> {prompt}"),
             path: None,
         });
-        self.agent_prompts.push_back(prompt);
+        self.agent_last_prompt = Some(prompt.clone());
+        self.agent_disk_before = self.capture_workspace_files();
+        self.agent_disk_changes.clear();
+        if let Some(backend) = &self.agent_backend {
+            backend.send(BackendCommand::Prompt(
+                self.agent_prompt_with_context(&prompt),
+            ));
+        } else {
+            self.agent_prompts.push_back(prompt);
+        }
         self.agent_panel_visible = true;
-        self.message = "Prompt queued for connected agent".into();
+        self.message = "Sent to Codex".into();
+    }
+
+    fn ensure_agent_backend(&mut self) {
+        if self.agent_backend.is_none() && !cfg!(test) {
+            self.agent_backend_status = BuiltinAgentStatus::Starting;
+            self.agent_backend = Some(AgentBackend::start(self.explorer.root().to_path_buf()));
+        }
+    }
+
+    fn agent_prompt_with_context(&self, prompt: &str) -> String {
+        let path = self
+            .current()
+            .path()
+            .and_then(|path| path.strip_prefix(self.explorer.root()).ok())
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| self.current().name());
+        let (line, column) = self.current().cursor_line_col();
+        let selection = self.current().selected_text().unwrap_or_default();
+        format!(
+            "{prompt}\n\nTTED context:\nCurrent file: {path}\nCursor: {}:{}\nSelection:\n{selection}",
+            line + 1,
+            column + 1
+        )
+    }
+
+    fn poll_agent_backend(&mut self) -> bool {
+        let mut changed = false;
+        while let Some(event) = self.agent_backend.as_ref().and_then(AgentBackend::try_recv) {
+            changed = true;
+            match event {
+                BackendEvent::Starting => self.agent_backend_status = BuiltinAgentStatus::Starting,
+                BackendEvent::Missing => self.agent_backend_status = BuiltinAgentStatus::Missing,
+                BackendEvent::Ready { authenticated } => {
+                    self.agent_backend_status = if authenticated {
+                        BuiltinAgentStatus::Ready
+                    } else {
+                        BuiltinAgentStatus::SignIn
+                    };
+                }
+                BackendEvent::LoginCode { url, code } => {
+                    self.agent_backend_status = BuiltinAgentStatus::LoginCode {
+                        url: url.clone(),
+                        code: code.clone(),
+                    };
+                    self.agent_messages.push(AgentMessage {
+                        text: format!("Sign in at {url} with code {code}"),
+                        path: None,
+                    });
+                }
+                BackendEvent::TurnStarted => {
+                    self.agent_backend_status = BuiltinAgentStatus::Working;
+                    self.agent_turn_diff.clear();
+                    self.agent_messages.push(AgentMessage {
+                        text: "Codex: ".into(),
+                        path: None,
+                    });
+                    self.agent_stream_message = Some(self.agent_messages.len() - 1);
+                }
+                BackendEvent::Delta(delta) => {
+                    if let Some(index) = self.agent_stream_message {
+                        if let Some(message) = self.agent_messages.get_mut(index) {
+                            message.text.push_str(&delta);
+                        }
+                    }
+                }
+                BackendEvent::Activity(text) => self.agent_messages.push(AgentMessage {
+                    text: format!("● {text}"),
+                    path: None,
+                }),
+                BackendEvent::Approval { id, detail } => {
+                    self.agent_approval = Some(AgentApproval { id, detail });
+                    self.agent_panel_focused = true;
+                    self.message = "Codex is waiting for your approval".into();
+                }
+                BackendEvent::Diff(diff) => self.agent_turn_diff = diff,
+                BackendEvent::Completed(status) => {
+                    self.agent_approval = None;
+                    self.agent_stream_message = None;
+                    self.agent_backend_status = BuiltinAgentStatus::Ready;
+                    self.agent_messages.push(AgentMessage {
+                        text: format!("✓ Codex {status}"),
+                        path: None,
+                    });
+                    self.explorer.refresh();
+                    self.git.request_refresh();
+                    changed |= self.check_external_files();
+                    self.finish_agent_disk_changes();
+                }
+                BackendEvent::Error(error) => {
+                    self.agent_approval = None;
+                    self.agent_stream_message = None;
+                    self.agent_backend_status = BuiltinAgentStatus::Error(error.clone());
+                    self.agent_messages.push(AgentMessage {
+                        text: format!("! {error}"),
+                        path: None,
+                    });
+                }
+            }
+        }
+        changed
+    }
+
+    fn stop_agent(&mut self) {
+        if let Some(backend) = &self.agent_backend {
+            backend.send(BackendCommand::Interrupt);
+            self.message = "Stopping Codex…".into();
+        }
+    }
+
+    fn answer_agent_approval(&mut self, accept: bool) {
+        let Some(approval) = self.agent_approval.take() else {
+            return;
+        };
+        if let Some(backend) = &self.agent_backend {
+            backend.send(BackendCommand::Approval {
+                id: approval.id,
+                accept,
+            });
+        }
+        self.message = if accept {
+            "Allowed this Codex action"
+        } else {
+            "Declined this Codex action"
+        }
+        .into();
+    }
+
+    fn new_agent_conversation(&mut self) {
+        if let Some(backend) = &self.agent_backend {
+            backend.send(BackendCommand::NewConversation);
+        }
+        self.agent_messages.clear();
+        self.agent_turn_diff.clear();
+        self.agent_stream_message = None;
+        self.message = "Started a new Codex conversation".into();
+    }
+
+    fn retry_agent(&mut self) {
+        if let Some(prompt) = self.agent_last_prompt.clone() {
+            self.enqueue_agent_prompt(prompt);
+        } else {
+            self.message = "There is no prompt to retry".into();
+        }
+    }
+
+    fn clear_agent_chat(&mut self) {
+        self.agent_messages.clear();
+        self.message = "Cleared Agent chat".into();
+    }
+
+    fn open_agent_diff(&mut self) {
+        let text = if self.agent_turn_diff.is_empty() {
+            self.git.snapshot().workspace_diff()
+        } else {
+            self.agent_turn_diff.clone()
+        };
+        self.open_read_only("Agent Changes.diff", text);
+    }
+
+    fn capture_workspace_files(&self) -> HashMap<PathBuf, Vec<u8>> {
+        let root = self.explorer.root();
+        let mut total = 0usize;
+        collect_workspace_files(root, 20_000)
+            .into_iter()
+            .filter_map(|relative| {
+                let path = root.join(relative);
+                let data = fs::read(&path).ok()?;
+                if data.len() > 2_000_000 || total.saturating_add(data.len()) > 20_000_000 {
+                    return None;
+                }
+                total += data.len();
+                Some((path, data))
+            })
+            .collect()
+    }
+
+    fn finish_agent_disk_changes(&mut self) {
+        let after = self.capture_workspace_files();
+        let mut paths = self
+            .agent_disk_before
+            .keys()
+            .chain(after.keys())
+            .cloned()
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths.dedup();
+        self.agent_disk_changes = paths
+            .into_iter()
+            .filter_map(|path| {
+                let before = self.agent_disk_before.get(&path).cloned();
+                let after = after.get(&path).cloned();
+                (before != after).then_some((path, AgentDiskChange { before, after }))
+            })
+            .collect();
     }
 
     fn enqueue_context_prompt(&mut self, instruction: &str) {
@@ -2255,9 +2579,12 @@ impl Editor {
                 }
             }
         }
+        let disk = self.agent_disk_changes.len();
+        self.agent_disk_changes.clear();
+        self.agent_disk_before.clear();
         self.git.request_refresh();
         self.message = if self.agent_modified.is_empty() {
-            format!("Accepted and saved {saved} agent-modified file(s)")
+            format!("Accepted {disk} Codex file(s) and saved {saved} API-edited file(s)")
         } else {
             format!(
                 "Saved {saved} file(s); unsaved agent changes remain in {} buffer(s)",
@@ -2281,8 +2608,27 @@ impl Editor {
                 }
             }
         }
+        let disk_changes = std::mem::take(&mut self.agent_disk_changes);
+        for (path, change) in disk_changes {
+            let current = fs::read(&path).ok();
+            if current != change.after {
+                self.agent_disk_changes.insert(path, change);
+                skipped += 1;
+                continue;
+            }
+            let result = match change.before {
+                Some(data) => fs::write(&path, data),
+                None => fs::remove_file(&path),
+            };
+            if result.is_err() {
+                skipped += 1;
+            }
+        }
+        self.explorer.refresh();
+        self.git.request_refresh();
+        let _ = self.check_external_files();
         self.message = if skipped == 0 {
-            "Reverted tracked agent edits".into()
+            "Reverted tracked agent changes".into()
         } else {
             format!("Revert skipped {skipped} buffer(s) changed after the agent edit")
         };
@@ -2594,7 +2940,7 @@ impl Editor {
             .as_ref()
             .map_or(String::new(), |_| "   Agent API".into());
         let status = format!(
-            "{left}   Ln {}, Col {}{git}{lsp}{agent}   F1 help  Ctrl+S save  Ctrl+Q quit",
+            "{left}   Ln {}, Col {}{git}{lsp}{agent}   F1 help  F9 agent  Ctrl+S save  Ctrl+Q quit",
             line + 1,
             char_col + 1
         );
@@ -2685,6 +3031,7 @@ impl Editor {
             "  Explorer: arrows, Enter, Esc/Tab      Navigate/open/return",
             "  Explorer: N / Shift+N / R / D         New file/dir, rename/delete",
             "  Ctrl+Shift+M / F6                     Markdown reading view",
+            "  F9                                    Toggle Agent chat",
             "  F11                                   Toggle Focus Mode",
             "  Ctrl+Q                                Quit",
             "",
@@ -2826,7 +3173,7 @@ impl Editor {
         let sections = Layout::vertical([
             Constraint::Min(3),
             Constraint::Length(3),
-            Constraint::Length(1),
+            Constraint::Length(2),
         ])
         .split(area);
         let visible = usize::from(sections[0].height.saturating_sub(2));
@@ -2852,19 +3199,29 @@ impl Editor {
                 }),
             ));
         }
+        let status = match &self.agent_backend_status {
+            BuiltinAgentStatus::Idle => "Agent",
+            BuiltinAgentStatus::Starting => "Codex — connecting…",
+            BuiltinAgentStatus::SignIn => "Codex — press Enter to sign in",
+            BuiltinAgentStatus::Ready => "Codex — ready",
+            BuiltinAgentStatus::Working => "Codex — working (Esc stops)",
+            BuiltinAgentStatus::LoginCode { .. } => "Codex — waiting for sign-in",
+            BuiltinAgentStatus::Missing => "Codex not installed — install the Codex CLI",
+            BuiltinAgentStatus::Error(_) => "Codex — needs attention",
+        };
         frame.render_widget(
             Paragraph::new(lines)
                 .wrap(ratatui::widgets::Wrap { trim: true })
                 .style(Style::default().bg(theme::MANTLE))
                 .block(
                     Block::bordered()
-                        .title(" Agent activity ")
+                        .title(format!(" {status} "))
                         .border_style(Style::default().fg(theme::MAUVE)),
                 ),
             sections[0],
         );
         let input = format!(
-            "> {}{}\nEnter send   Esc document",
+            "> {}{}\nEnter send   Shift+Enter newline",
             self.agent_input,
             if self.agent_panel_focused { "_" } else { "" }
         );
@@ -2883,10 +3240,85 @@ impl Editor {
             sections[1],
         );
         frame.render_widget(
-            Paragraph::new(" [View Diff] [Accept] [Revert] ")
+            Paragraph::new("[Stop] [Retry] [New] [Clear]\n[Diff] [Accept] [Revert]")
                 .style(Style::default().bg(theme::SURFACE0).fg(theme::SUBTEXT0)),
             sections[2],
         );
+        let setup = match &self.agent_backend_status {
+            BuiltinAgentStatus::SignIn => {
+                Some("Codex is installed\n\n[ Sign in with ChatGPT ]\n\nClick or press Enter")
+            }
+            BuiltinAgentStatus::Missing => {
+                Some("Codex is not installed\n\n[ Show install command ]\n\nClick for simple setup")
+            }
+            BuiltinAgentStatus::LoginCode { url, code } => {
+                let text =
+                    format!("Finish signing in\n\n{url}\nCode: {code}\n\nClick to copy code");
+                let popup = centered_rect(area, area.width.saturating_sub(4).min(48), 9);
+                frame.render_widget(Clear, popup);
+                frame.render_widget(
+                    Paragraph::new(text)
+                        .alignment(ratatui::layout::Alignment::Center)
+                        .style(Style::default().bg(theme::BASE).fg(theme::TEXT))
+                        .block(
+                            Block::bordered()
+                                .title(" Connect Codex ")
+                                .border_style(Style::default().fg(theme::GREEN)),
+                        ),
+                    popup,
+                );
+                None
+            }
+            BuiltinAgentStatus::Error(error) => {
+                let text = format!("Codex needs attention\n\n{error}\n\nRetry the Agent panel");
+                let popup = centered_rect(area, area.width.saturating_sub(4).min(48), 8);
+                frame.render_widget(Clear, popup);
+                frame.render_widget(
+                    Paragraph::new(text)
+                        .alignment(ratatui::layout::Alignment::Center)
+                        .style(Style::default().bg(theme::BASE).fg(theme::RED))
+                        .block(Block::bordered().title(" Agent error ")),
+                    popup,
+                );
+                None
+            }
+            _ => None,
+        };
+        if let Some(text) = setup {
+            let popup = centered_rect(area, area.width.saturating_sub(4).min(48), 8);
+            frame.render_widget(Clear, popup);
+            frame.render_widget(
+                Paragraph::new(text)
+                    .alignment(ratatui::layout::Alignment::Center)
+                    .style(Style::default().bg(theme::BASE).fg(theme::TEXT))
+                    .block(
+                        Block::bordered()
+                            .title(" Connect an agent ")
+                            .border_style(Style::default().fg(theme::MAUVE)),
+                    ),
+                popup,
+            );
+        }
+        if let Some(approval) = &self.agent_approval {
+            let text = format!(
+                "Codex wants permission to:\n\n{}\n\n[ Allow ]          [ Decline ]\nEnter/Y allows · Esc/N declines",
+                approval.detail
+            );
+            let popup = centered_rect(area, area.width.saturating_sub(4).min(56), 10);
+            frame.render_widget(Clear, popup);
+            frame.render_widget(
+                Paragraph::new(text)
+                    .alignment(ratatui::layout::Alignment::Center)
+                    .wrap(ratatui::widgets::Wrap { trim: true })
+                    .style(Style::default().bg(theme::BASE).fg(theme::TEXT))
+                    .block(
+                        Block::bordered()
+                            .title(" Permission needed ")
+                            .border_style(Style::default().fg(theme::PEACH)),
+                    ),
+                popup,
+            );
+        }
     }
 
     fn render_secondary_pane(&self, frame: &mut Frame) {
@@ -3428,6 +3860,17 @@ fn control_letter(character: char) -> Option<char> {
     (1..=26)
         .contains(&value)
         .then(|| char::from_u32(value + 96).expect("ASCII control mapping"))
+}
+
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
 }
 
 fn key_event_name(key: &KeyEvent) -> String {
@@ -4012,5 +4455,36 @@ mod input_tests {
         assert_eq!(editor.current().text(), "agent human");
         assert!(editor.agent_modified.contains_key(&id));
         assert!(editor.message.contains("skipped"));
+    }
+
+    #[test]
+    fn built_in_agent_disk_changes_can_be_reverted_safely() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("agent.txt");
+        fs::write(&path, "before").unwrap();
+        let mut editor = Editor::new(Vec::new());
+        editor.explorer = Explorer::new(root.path().to_path_buf());
+        editor.agent_disk_before = editor.capture_workspace_files();
+        fs::write(&path, "after").unwrap();
+        editor.finish_agent_disk_changes();
+        assert_eq!(editor.agent_disk_changes.len(), 1);
+        editor.revert_agent_changes();
+        assert_eq!(fs::read_to_string(path).unwrap(), "before");
+    }
+
+    #[test]
+    fn built_in_agent_revert_preserves_later_human_disk_change() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("agent.txt");
+        fs::write(&path, "before").unwrap();
+        let mut editor = Editor::new(Vec::new());
+        editor.explorer = Explorer::new(root.path().to_path_buf());
+        editor.agent_disk_before = editor.capture_workspace_files();
+        fs::write(&path, "agent").unwrap();
+        editor.finish_agent_disk_changes();
+        fs::write(&path, "human").unwrap();
+        editor.revert_agent_changes();
+        assert_eq!(fs::read_to_string(path).unwrap(), "human");
+        assert_eq!(editor.agent_disk_changes.len(), 1);
     }
 }

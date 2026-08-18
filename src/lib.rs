@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod agent_backend;
 pub mod buffer;
 pub mod command;
 pub mod config;

@@ -11,6 +11,8 @@ editor loop; background workers never mutate UI state directly.
 - `service.rs`: small cancellable worker and managed-process primitives.
 - `git.rs`, `lsp.rs`: typed background integrations.
 - `agent.rs`: permission-scoped local JSON-RPC transport.
+- `agent_backend.rs`: managed provider-neutral chat backend; the first adapter
+  speaks the supported Codex app-server stdio protocol.
 - `config.rs`: zero-config defaults and TOML loading.
 
 A file is persisted data, a buffer owns editable text, a tab selects an open

@@ -18,6 +18,10 @@ agent connection.
   signature help.
 - Permission-scoped local agent JSON-RPC using stable buffer IDs/revisions, plus
   an optional prompt/activity/diff/accept/revert panel.
+- F9 built-in Codex chat with automatic CLI detection, device-code sign-in,
+  persistent conversation threads, streamed replies/activity/diffs, Stop,
+  Retry, New/Clear, workspace sandboxing, centered one-action permission prompts,
+  and safe disk-change Accept/Revert.
 - Optional workspace TOML for editor, explorer, custom command keys, language
   servers, and agent capabilities. Defaults require no configuration.
 

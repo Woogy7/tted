@@ -4,6 +4,10 @@ TTED exposes newline-delimited JSON-RPC 2.0 on a local Unix-domain socket. The
 default socket is `/tmp/tted-<pid>.sock`; set `TTED_SOCKET` to override it. The
 socket is created with mode `0600` and removed during graceful shutdown.
 
+Most users do not need this API. Press F9 for TTED's automatically managed
+built-in Codex chat; see [AGENT_CHAT.md](AGENT_CHAT.md). This API remains the
+provider-neutral integration point for custom external agents.
+
 Example request:
 
 ```json
