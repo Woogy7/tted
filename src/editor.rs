@@ -2,7 +2,7 @@ use std::{
     fs,
     io::{self, Write},
     path::PathBuf,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
@@ -25,8 +25,14 @@ use syntect::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::buffer::Buffer;
+use crate::buffer::{Buffer, ExternalChange};
 use crate::theme;
+
+#[derive(Clone, Copy)]
+struct ExternalPrompt {
+    buffer: usize,
+    change: ExternalChange,
+}
 
 pub struct Editor {
     buffers: Vec<Buffer>,
@@ -47,6 +53,7 @@ pub struct Editor {
     sidebar_entries: Vec<PathBuf>,
     sidebar_hits: Vec<(u16, PathBuf)>,
     workspace_root: PathBuf,
+    external_prompt: Option<ExternalPrompt>,
     syntaxes: SyntaxSet,
     theme: Theme,
     message: String,
@@ -91,6 +98,7 @@ impl Editor {
             sidebar_entries,
             sidebar_hits: Vec::new(),
             workspace_root,
+            external_prompt: None,
             syntaxes,
             theme,
             message,
@@ -107,12 +115,21 @@ impl Editor {
 
     pub fn run(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         terminal.draw(|frame| self.render(frame))?;
+        let mut last_disk_check = Instant::now();
         loop {
-            if event::poll(Duration::from_millis(250))? {
+            let mut redraw = false;
+            if event::poll(Duration::from_millis(100))? {
                 let event = event::read()?;
                 if self.handle_event(event)? {
                     return Ok(());
                 }
+                redraw = true;
+            }
+            if last_disk_check.elapsed() >= Duration::from_millis(500) {
+                redraw |= self.check_external_files();
+                last_disk_check = Instant::now();
+            }
+            if redraw {
                 terminal.draw(|frame| self.render(frame))?;
             }
         }
@@ -126,7 +143,7 @@ impl Editor {
                 return self.key(key)
             }
             Event::Paste(text) => {
-                if self.help_visible {
+                if self.help_visible || self.external_prompt.is_some() {
                     return Ok(false);
                 } else if let Some(path) = &mut self.path_prompt {
                     path.push_str(text.trim_end_matches(['\r', '\n']));
@@ -137,7 +154,7 @@ impl Editor {
                     self.changed();
                 }
             }
-            Event::Mouse(_) if self.help_visible => {}
+            Event::Mouse(_) if self.help_visible || self.external_prompt.is_some() => {}
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::Down(MouseButton::Left)
                     if self
@@ -209,6 +226,9 @@ impl Editor {
         if key.code == KeyCode::F(1) {
             self.help_visible = true;
             return Ok(false);
+        }
+        if self.external_prompt.is_some() {
+            return self.external_prompt_key(key);
         }
         if self.path_prompt.is_some() {
             return self.path_prompt_key(key);
@@ -370,7 +390,7 @@ impl Editor {
         }
         match key.code {
             KeyCode::Char(c) => {
-                self.current_mut().insert(&c.to_string());
+                self.current_mut().insert_typed(&c.to_string());
                 self.changed();
             }
             KeyCode::Enter => {
@@ -503,6 +523,77 @@ impl Editor {
             _ => {}
         }
         Ok(false)
+    }
+
+    fn external_prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
+        let Some(prompt) = self.external_prompt else {
+            return Ok(false);
+        };
+        match key.code {
+            KeyCode::Char('r' | 'R') => match self.buffers[prompt.buffer].reload_from_disk() {
+                Ok(()) => {
+                    self.external_prompt = None;
+                    self.message = "Reloaded file from disk".into();
+                    self.ensure_visible();
+                }
+                Err(error) => self.message = format!("Reload failed: {error}; K keeps the buffer"),
+            },
+            KeyCode::Char('k' | 'K') => {
+                self.buffers[prompt.buffer].keep_after_external_change();
+                self.external_prompt = None;
+                self.message = if prompt.change == ExternalChange::Deleted {
+                    "Keeping deleted file in the editor; Save will recreate it"
+                } else {
+                    "Keeping editor version; Save will overwrite the disk version"
+                }
+                .into();
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn check_external_files(&mut self) -> bool {
+        if self.external_prompt.is_some() {
+            return false;
+        }
+        for index in 0..self.buffers.len() {
+            match self.buffers[index].check_external_change() {
+                Ok(ExternalChange::None) => {}
+                Ok(ExternalChange::Modified) if !self.buffers[index].is_dirty() => {
+                    match self.buffers[index].reload_from_disk() {
+                        Ok(()) => {
+                            self.message = format!(
+                                "Reloaded {} after an external change",
+                                self.buffers[index].name()
+                            )
+                        }
+                        Err(error) => {
+                            self.message =
+                                format!("Could not reload {}: {error}", self.buffers[index].name())
+                        }
+                    }
+                    return true;
+                }
+                Ok(change) => {
+                    self.active = index;
+                    self.reset_view();
+                    self.external_prompt = Some(ExternalPrompt {
+                        buffer: index,
+                        change,
+                    });
+                    return true;
+                }
+                Err(error) => {
+                    self.message = format!(
+                        "Could not check {} for changes: {error}",
+                        self.buffers[index].name()
+                    );
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn close_current_tab(&mut self) {
@@ -653,10 +744,12 @@ impl Editor {
                 Paragraph::new(visible).style(Style::default().bg(theme::BASE).fg(theme::TEXT)),
                 self.body,
             );
-            let status = format!(
-                "{}   Markdown reading view   F1 help   Ctrl+Shift+M source",
-                self.current().name()
-            );
+            let status = self.external_prompt_text().unwrap_or_else(|| {
+                format!(
+                    "{}   Markdown reading view   F1 help   Ctrl+Shift+M source",
+                    self.current().name()
+                )
+            });
             frame.render_widget(
                 Paragraph::new(status).style(Style::default().bg(theme::SURFACE0).fg(theme::TEXT)),
                 areas[2],
@@ -732,7 +825,9 @@ impl Editor {
             .path()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "Untitled".into());
-        let left = if let Some(path) = &self.path_prompt {
+        let left = if let Some(prompt) = self.external_prompt_text() {
+            prompt
+        } else if let Some(path) = &self.path_prompt {
             format!("Save As: {path}_   Enter save  Esc cancel")
         } else if let Some(query) = &self.search_query {
             format!("Find: {query}_   Enter search  Esc cancel")
@@ -816,6 +911,20 @@ impl Editor {
                 ),
             popup,
         );
+    }
+
+    fn external_prompt_text(&self) -> Option<String> {
+        self.external_prompt.map(|prompt| match prompt.change {
+            ExternalChange::Modified => {
+                "File changed on disk — R reloads (discarding editor edits), K keeps editor version"
+                    .into()
+            }
+            ExternalChange::Deleted => {
+                "File deleted on disk — R retries reload, K keeps buffer so Save can recreate it"
+                    .into()
+            }
+            ExternalChange::None => String::new(),
+        })
     }
 
     fn render_sidebar(&mut self, frame: &mut Frame, area: Rect) {
@@ -938,9 +1047,13 @@ fn same_path(left: &std::path::Path, right: &std::path::Path) -> bool {
 
 #[cfg(test)]
 mod input_tests {
-    use std::fs;
+    use std::{
+        fs,
+        time::{Duration, Instant},
+    };
 
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use ratatui::{backend::TestBackend, Terminal};
 
     use super::{control_letter, workspace_files, Editor};
 
@@ -975,5 +1088,48 @@ mod input_tests {
             .key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL))
             .unwrap();
         assert!(quit);
+    }
+
+    #[test]
+    fn clean_external_change_reloads_automatically() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("clean.txt");
+        fs::write(&path, "before").unwrap();
+        let mut editor = Editor::new(vec![path.clone()]);
+        fs::write(path, "after with a different length").unwrap();
+        assert!(editor.check_external_files());
+        assert_eq!(editor.current().text(), "after with a different length");
+        assert!(editor.external_prompt.is_none());
+    }
+
+    #[test]
+    fn dirty_external_change_requires_choice_and_keep_preserves_text() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("dirty.txt");
+        fs::write(&path, "base").unwrap();
+        let mut editor = Editor::new(vec![path.clone()]);
+        editor.current_mut().insert_typed("editor");
+        fs::write(path, "changed on disk with a different length").unwrap();
+        assert!(editor.check_external_files());
+        assert!(editor.external_prompt.is_some());
+        editor
+            .key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(editor.current().text(), "editorbase");
+        assert!(editor.current().is_dirty());
+        assert!(editor.external_prompt.is_none());
+    }
+
+    #[test]
+    fn large_source_file_first_render_sanity() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("large.rs");
+        fs::write(&path, "fn example() { let value = 42; }\n".repeat(20_000)).unwrap();
+        let mut editor = Editor::new(vec![path]);
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let started = Instant::now();
+        terminal.draw(|frame| editor.render(frame)).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }

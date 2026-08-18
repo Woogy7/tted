@@ -162,6 +162,14 @@ Refactor only when upcoming functionality creates a concrete need.
 
 # Phase 1 — Finish and Harden the Editing Core
 
+**Status: ✅ Complete**
+
+Phase 1 was completed with natural time-bounded typing/deletion transactions,
+saved-content-aware dirty tracking, periodic external file detection, automatic
+clean reloads, explicit reload/keep conflict handling, expanded reliability
+coverage, and large-file sanity tests. Undo still uses rope snapshots by design;
+memory compaction remains a later optimization if measurements justify it.
+
 ## Goal
 
 Make the basic editing experience trustworthy enough that TTED can genuinely be used to edit real projects.
@@ -169,6 +177,10 @@ Make the basic editing experience trustworthy enough that TTED can genuinely be 
 This phase comes before Git, LSP, or agents.
 
 ## 1.1 Natural undo transactions
+
+**✅ Completed.** Sequential typing, Backspace, and Delete coalesce naturally.
+Movement breaks a group. Paste, indentation, newline insertion, and selection
+replacement remain atomic.
 
 Current undo uses full rope snapshots.
 
@@ -199,6 +211,10 @@ A more compact edit-history representation can come later if necessary.
 
 ## 1.2 External file change detection
 
+**✅ Completed.** TTED polls open-file metadata, automatically reloads clean
+buffers, prompts before replacing dirty buffers, detects deletion and recreation,
+and supports keeping deleted content so Save recreates the file.
+
 Detect when an open file changes on disk.
 
 Handle at minimum:
@@ -212,6 +228,11 @@ Never silently destroy unsaved editor content.
 Provide a simple, understandable reload/keep-editing flow.
 
 ## 1.3 Editing reliability
+
+**✅ Completed.** Tests now cover Unicode graphemes and cell widths, multiline
+selection and paste, grouped undo/redo, saved-state identity, CRLF preservation,
+files without a final newline, Save As, external changes, long lines, and deleted
+files.
 
 Expand tests around:
 
@@ -227,6 +248,12 @@ Expand tests around:
 - files without final newline.
 
 ## 1.4 Performance sanity checks
+
+**✅ Completed.** Debug tests exercise editing a roughly 1.6 MB/20,000-line buffer,
+a 200,000-character line, and first syntax render of a 20,000-line Rust file. The
+complete 28-test suite runs well below the deliberately generous five-second
+sanity thresholds in the development environment. Grapheme navigation was also
+changed to inspect only the current line instead of cloning the full buffer.
 
 Test reasonably large files and ensure:
 
@@ -951,14 +978,15 @@ A small number of features that feel exceptionally good is more valuable than ra
 
 # Immediate Next Work
 
-Begin with **Phase 1 — Finish and Harden the Editing Core**.
+Phase 1 is complete. Begin with **Phase 2 — Workspace and Explorer UX**.
 
 Recommended order:
 
-1. Natural undo transaction grouping.
-2. External file change detection.
-3. Editing reliability tests.
-4. Performance sanity checks.
-5. Update project documentation.
+1. Replace the flattened explorer with a keyboard-navigable directory tree.
+2. Add deliberate explorer file operations with confirmations.
+3. Improve overflowing tabs and add a close affordance.
+4. Implement Focus Mode.
+5. Add Quick Open.
+6. Expand search and replacement.
 
-Do not start Git, LSP, split panes, or agent integration until the Phase 1 foundation is solid.
+Do not start Git, LSP, split panes, or agent integration until the Phase 2 workspace experience is solid.

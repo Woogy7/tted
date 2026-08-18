@@ -20,6 +20,8 @@ Herdr without requiring an AI agent.
 - a Catppuccin Mocha-inspired editor interface
 - a collapsible, mouse-enabled workspace file explorer
 - grapheme-aware movement and deletion with terminal-cell-aware cursor placement
+- natural undo groups for typing and deletion, with atomic paste and indentation
+- automatic clean-file reload and explicit reload/keep prompts for disk conflicts
 
 Syntax highlighting, the file explorer, Markdown rendering, Git, LSP, and the
 agent API are intentionally deferred until the editing core is proven.
@@ -54,6 +56,11 @@ yet supported.
 | Ctrl+Shift+M / F6 | Toggle Markdown source / reading view |
 | Ctrl+Q | Quit; press twice when changes are unsaved |
 | F1 | Show keybindings help |
+
+When an open file changes on disk, TTED reloads it automatically if the editor
+buffer is clean. If unsaved edits could be lost, use `R` to reload the disk
+version or `K` to keep the editor version. Deleted files can be kept and recreated
+with Save.
 
 ## Development
 

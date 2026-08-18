@@ -27,6 +27,12 @@ Text is stored in a Ropey UTF-8 rope. Buffers support insertion, selections,
 replacement, Backspace, Delete, multiline bracketed paste, undo, and redo. Edit
 history and cursor state belong to each buffer.
 
+Sequential typing and deletion are grouped into natural undo transactions.
+Navigation ends the active group, while paste, selection replacement, newline,
+and indentation changes remain deliberate atomic transactions. Undo and redo
+track saved-content identity, so returning to the saved text clears the dirty
+indicator correctly.
+
 Navigation supports arrows, Home, End, Page Up, Page Down, Shift-selection,
 mouse clicks, mouse dragging, vertical scrolling, and horizontal scrolling.
 Movement, deletion, rendering, and mouse hit-testing understand Unicode grapheme
@@ -58,6 +64,12 @@ The file explorer is toggled with Ctrl+B. It lists ordinary workspace files by
 relative path, omits hidden folders and `target`, and opens files by mouse click.
 Clicking a file that is already open focuses its existing tab. The explorer
 automatically stays hidden when the terminal is too narrow.
+
+Open files are checked periodically for disk changes. Clean buffers reload
+automatically. A changed file with unsaved editor content requires an explicit
+reload-or-keep decision, and deleted files can be kept in memory and recreated
+with Save. Mouse, paste, and ordinary editing input are blocked until conflicts
+are resolved.
 
 ## Search, syntax, and Markdown
 
@@ -111,10 +123,11 @@ LSP, Git services, and the future agent API have not been introduced yet.
 
 ## Verification
 
-The project currently has 13 passing unit tests covering buffer edits, undo/redo,
-selection replacement, indentation, wrapped search, Save As, Markdown rendering,
-file-explorer filtering, raw terminal control keys, Markdown-view quitting, and
-Unicode grapheme behavior.
+The project currently has 28 passing unit tests covering buffer edits, natural
+undo groups, saved/dirty identity, multiline selection and paste, CRLF and final
+newline preservation, wrapped search, Save As, external modification/deletion
+flows, Markdown rendering, file-explorer filtering, raw terminal control keys,
+Markdown-view quitting, Unicode grapheme behavior, long lines, and large files.
 
 The development checks are:
 
@@ -133,19 +146,20 @@ of mouse, focus, bracketed-paste, cursor, raw, and alternate-screen modes.
 
 This is still an early editor foundation. Notable limitations are:
 
-- undo currently stores full rope snapshots and typing is not yet coalesced into
-  natural undo groups;
+- undo transactions still store full rope snapshots; grouping is natural now,
+  but a compact edit-based history may eventually reduce memory use;
 - the explorer is a flattened, mouse-oriented list without directory expansion,
   keyboard focus, scrolling, file creation, rename, or deletion;
 - search is exact and case-sensitive, with no live match count or replacement;
 - syntax state is recomputed for visible rendering rather than cached by buffer
   revision;
-- external file changes are not detected;
+- file-change detection currently polls file metadata rather than using a
+  background filesystem watcher;
 - clipboard paste from outside TTED depends on the terminal's native paste path;
 - configuration, custom keybindings, Git information, LSP, split panes, and the
   agent interaction API remain to be built.
 
-The recommended next phase is reliability and workspace depth: detect external
-file changes, turn the explorer into a keyboard-navigable collapsible tree, and
-improve undo transaction grouping. Git status can follow, then the asynchronous
-service boundary needed for LSP.
+Phase 1 editing-core hardening is complete. The next roadmap phase is workspace
+and explorer UX: turn the explorer into a keyboard-navigable collapsible tree,
+then add deliberate file operations, better overflowing tabs, Focus Mode, Quick
+Open, and stronger search workflows.
