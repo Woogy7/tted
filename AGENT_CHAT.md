@@ -19,12 +19,19 @@ refresh in the normal editor area when work finishes.
 
 Human messages are labeled **YOU** on a tinted background; replies are labeled
 **CODEX**, while activity and errors use quieter dot and warning rows. Scroll
-conversation history with the mouse wheel or Page Up/Down. Home jumps to the
-oldest history and End returns to the latest message.
+conversation history with the mouse wheel or Page Up/Down. Ctrl+Home jumps to
+the oldest history and Ctrl+End returns to the latest message.
+Drag across conversation text to select it, then press Ctrl+C to copy it.
+
+The prompt wraps automatically and grows to show up to six lines. Use arrows to
+move through it, Shift+Left/Right or Ctrl+A to select text, Ctrl+C/Ctrl+X to
+copy or cut, and Ctrl+V or your terminal's paste command to paste.
 
 Ordinary reads, workspace edits, patches, and validation run without repeated
 approval prompts. Codex still receives a workspace-write filesystem sandbox:
-outside-workspace writes remain blocked. If TTED is itself running inside a
+outside-workspace writes remain blocked. On hosts that cannot initialize
+Bubblewrap, Codex may request a one-time fallback command; TTED shows that
+command for explicit approval and never silently broadens access. If TTED is itself running inside a
 Codex permission profile, it reuses that outer boundary instead of nesting a
 second Bubblewrap sandbox that the container may not permit.
 

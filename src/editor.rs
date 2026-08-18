@@ -188,11 +188,18 @@ pub struct Editor {
     agent_panel_visible: bool,
     agent_panel_focused: bool,
     agent_input: String,
+    agent_input_cursor: usize,
+    agent_input_anchor: Option<usize>,
+    agent_transcript_anchor: Option<usize>,
+    agent_transcript_cursor: Option<usize>,
+    agent_transcript_text: String,
+    agent_transcript_hits: Vec<(u16, usize, String)>,
     agent_messages: Vec<AgentMessage>,
     agent_scroll: usize,
     agent_prompts: VecDeque<String>,
     agent_modified: HashMap<u64, (usize, u64)>,
     agent_area: Option<Rect>,
+    agent_input_area: Option<Rect>,
     agent_hits: Vec<(u16, PathBuf)>,
     syntaxes: SyntaxSet,
     theme: Theme,
@@ -295,11 +302,18 @@ impl Editor {
             agent_panel_visible: false,
             agent_panel_focused: false,
             agent_input: String::new(),
+            agent_input_cursor: 0,
+            agent_input_anchor: None,
+            agent_transcript_anchor: None,
+            agent_transcript_cursor: None,
+            agent_transcript_text: String::new(),
+            agent_transcript_hits: Vec::new(),
             agent_messages: Vec::new(),
             agent_scroll: 0,
             agent_prompts: VecDeque::new(),
             agent_modified: HashMap::new(),
             agent_area: None,
+            agent_input_area: None,
             agent_hits: Vec::new(),
             syntaxes,
             theme,
@@ -383,8 +397,7 @@ impl Editor {
                 } else if let Some(message) = &mut self.git_commit_prompt {
                     message.push_str(text.trim_end_matches(['\r', '\n']));
                 } else if self.agent_panel_focused {
-                    self.agent_input
-                        .push_str(text.trim_end_matches(['\r', '\n']));
+                    self.insert_agent_input(text.trim_end_matches(['\r', '\n']));
                 } else if let Some(prompt) = &mut self.lsp_prompt {
                     prompt.input.push_str(text.trim_end_matches(['\r', '\n']));
                 } else if let Some(path) = &mut self.path_prompt {
@@ -472,12 +485,73 @@ impl Editor {
                     {
                         self.agent_scroll = self.agent_scroll.saturating_sub(3);
                     }
+                    MouseEventKind::Drag(MouseButton::Left)
+                        if self.agent_input_area.is_some_and(|area| {
+                            area.contains((mouse.column, mouse.row).into())
+                        }) =>
+                    {
+                        let area = self.agent_input_area.expect("Agent input area checked");
+                        let position = agent_input_char_at(
+                            &self.agent_input,
+                            usize::from(area.width.saturating_sub(2).max(1)),
+                            usize::from(area.height.saturating_sub(2).max(1)),
+                            usize::from(mouse.row.saturating_sub(area.y + 1)),
+                            usize::from(mouse.column.saturating_sub(area.x + 1)),
+                        );
+                        self.set_agent_input_cursor(position, true);
+                    }
+                    MouseEventKind::Drag(MouseButton::Left)
+                        if self
+                            .agent_transcript_hits
+                            .iter()
+                            .any(|(row, _, _)| *row == mouse.row) =>
+                    {
+                        if let Some((_, offset, text)) = self
+                            .agent_transcript_hits
+                            .iter()
+                            .find(|(row, _, _)| *row == mouse.row)
+                        {
+                            let text_column = usize::from(
+                                mouse
+                                    .column
+                                    .saturating_sub(self.agent_area.expect("Agent area").x + 7),
+                            );
+                            self.agent_transcript_cursor =
+                                Some(*offset + text_column.min(text.chars().count()));
+                        }
+                    }
                     MouseEventKind::Down(MouseButton::Left)
                         if self.agent_area.is_some_and(|area| {
                             area.contains((mouse.column, mouse.row).into())
                         }) =>
                     {
                         let area = self.agent_area.expect("Agent area checked");
+                        if let Some(input_area) = self.agent_input_area.filter(|input_area| {
+                            input_area.contains((mouse.column, mouse.row).into())
+                        }) {
+                            let position = agent_input_char_at(
+                                &self.agent_input,
+                                usize::from(input_area.width.saturating_sub(2).max(1)),
+                                usize::from(input_area.height.saturating_sub(2).max(1)),
+                                usize::from(mouse.row.saturating_sub(input_area.y + 1)),
+                                usize::from(mouse.column.saturating_sub(input_area.x + 1)),
+                            );
+                            self.agent_panel_focused = true;
+                            self.set_agent_input_cursor(position, false);
+                            return Ok(false);
+                        }
+                        if let Some((_, offset, text)) = self
+                            .agent_transcript_hits
+                            .iter()
+                            .find(|(row, _, _)| *row == mouse.row)
+                        {
+                            let text_column = usize::from(mouse.column.saturating_sub(area.x + 7));
+                            let position = *offset + text_column.min(text.chars().count());
+                            self.agent_transcript_anchor = Some(position);
+                            self.agent_transcript_cursor = Some(position);
+                            self.agent_panel_focused = true;
+                            return Ok(false);
+                        }
                         if self.agent_approval.is_some() {
                             self.answer_agent_approval(mouse.column < area.x + area.width / 2);
                             return Ok(false);
@@ -874,6 +948,11 @@ impl Editor {
         }
         if ctrl {
             match key.code {
+                KeyCode::Char('a') => {
+                    self.current_mut().select_all();
+                    self.ensure_visible();
+                    self.message = "Selected all text".into();
+                }
                 KeyCode::Char('q') => {
                     return self.execute_command(Command::Quit);
                 }
@@ -2572,8 +2651,8 @@ impl Editor {
             KeyCode::Char('g') | KeyCode::Char('G') if ctrl => self.agent_panel_focused = false,
             KeyCode::PageUp => self.agent_scroll = self.agent_scroll.saturating_add(8),
             KeyCode::PageDown => self.agent_scroll = self.agent_scroll.saturating_sub(8),
-            KeyCode::Home => self.agent_scroll = usize::MAX,
-            KeyCode::End => self.agent_scroll = 0,
+            KeyCode::Home if ctrl => self.agent_scroll = usize::MAX,
+            KeyCode::End if ctrl => self.agent_scroll = 0,
             KeyCode::Esc if matches!(self.agent_backend_status, BuiltinAgentStatus::Working) => {
                 self.stop_agent()
             }
@@ -2581,10 +2660,45 @@ impl Editor {
             KeyCode::Char('l') if ctrl => self.new_agent_conversation(),
             KeyCode::Char('r') if ctrl => self.retry_agent(),
             KeyCode::Char('k') if ctrl => self.clear_agent_chat(),
-            KeyCode::Enter if shift => self.agent_input.push('\n'),
-            KeyCode::Backspace => {
-                self.agent_input.pop();
+            KeyCode::Char('a') if ctrl => {
+                self.agent_input_anchor = Some(0);
+                self.agent_input_cursor = self.agent_input.chars().count();
             }
+            KeyCode::Char('c') if ctrl => {
+                if let Some(text) = self.selected_agent_input() {
+                    self.copy_to_terminal_clipboard(&text)?;
+                    self.clipboard = Some(text);
+                    self.message = "Copied agent prompt selection".into();
+                } else if let Some(text) = self.selected_agent_transcript() {
+                    self.copy_to_terminal_clipboard(&text)?;
+                    self.clipboard = Some(text);
+                    self.message = "Copied agent conversation selection".into();
+                }
+            }
+            KeyCode::Char('x') if ctrl => {
+                if let Some(text) = self.selected_agent_input() {
+                    self.copy_to_terminal_clipboard(&text)?;
+                    self.clipboard = Some(text);
+                    self.delete_agent_input_selection();
+                }
+            }
+            KeyCode::Char('v') if ctrl => {
+                if let Some(text) = self.clipboard.clone() {
+                    self.insert_agent_input(&text);
+                } else {
+                    self.message =
+                        "TTED clipboard is empty; use your terminal's paste shortcut".into();
+                }
+            }
+            KeyCode::Left => self.move_agent_input_cursor(-1, shift),
+            KeyCode::Right => self.move_agent_input_cursor(1, shift),
+            KeyCode::Home => self.set_agent_input_cursor(0, shift),
+            KeyCode::End => {
+                let end = self.agent_input.chars().count();
+                self.set_agent_input_cursor(end, shift);
+            }
+            KeyCode::Enter if shift => self.insert_agent_input("\n"),
+            KeyCode::Backspace => self.backspace_agent_input(),
             KeyCode::Enter => {
                 if matches!(self.agent_backend_status, BuiltinAgentStatus::SignIn) {
                     if let Some(backend) = &self.agent_backend {
@@ -2594,16 +2708,119 @@ impl Editor {
                     return Ok(false);
                 }
                 let prompt = std::mem::take(&mut self.agent_input);
+                self.agent_input_cursor = 0;
+                self.agent_input_anchor = None;
                 if !prompt.trim().is_empty() {
                     self.enqueue_agent_prompt(prompt);
                 }
             }
             KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.agent_input.push(character)
+                self.insert_agent_input(&character.to_string())
             }
             _ => {}
         }
         Ok(false)
+    }
+
+    fn agent_input_selection(&self) -> Option<(usize, usize)> {
+        self.agent_input_anchor
+            .filter(|anchor| *anchor != self.agent_input_cursor)
+            .map(|anchor| {
+                if anchor < self.agent_input_cursor {
+                    (anchor, self.agent_input_cursor)
+                } else {
+                    (self.agent_input_cursor, anchor)
+                }
+            })
+    }
+
+    fn selected_agent_input(&self) -> Option<String> {
+        let (start, end) = self.agent_input_selection()?;
+        Some(
+            self.agent_input
+                .chars()
+                .skip(start)
+                .take(end - start)
+                .collect(),
+        )
+    }
+
+    fn agent_transcript_selection(&self) -> Option<(usize, usize)> {
+        let (anchor, cursor) = (self.agent_transcript_anchor?, self.agent_transcript_cursor?);
+        (anchor != cursor).then_some(if anchor < cursor {
+            (anchor, cursor)
+        } else {
+            (cursor, anchor)
+        })
+    }
+
+    fn selected_agent_transcript(&self) -> Option<String> {
+        let (start, end) = self.agent_transcript_selection()?;
+        Some(
+            self.agent_transcript_text
+                .chars()
+                .skip(start)
+                .take(end - start)
+                .collect(),
+        )
+    }
+
+    fn delete_agent_input_selection(&mut self) -> bool {
+        let Some((start, end)) = self.agent_input_selection() else {
+            return false;
+        };
+        self.agent_input = self
+            .agent_input
+            .chars()
+            .take(start)
+            .chain(self.agent_input.chars().skip(end))
+            .collect();
+        self.agent_input_cursor = start;
+        self.agent_input_anchor = None;
+        true
+    }
+
+    fn insert_agent_input(&mut self, text: &str) {
+        self.delete_agent_input_selection();
+        let cursor = self.agent_input_cursor;
+        self.agent_input = self
+            .agent_input
+            .chars()
+            .take(cursor)
+            .chain(text.chars())
+            .chain(self.agent_input.chars().skip(cursor))
+            .collect();
+        self.agent_input_cursor += text.chars().count();
+        self.agent_input_anchor = None;
+    }
+
+    fn backspace_agent_input(&mut self) {
+        if self.delete_agent_input_selection() || self.agent_input_cursor == 0 {
+            return;
+        }
+        self.agent_input_anchor = Some(self.agent_input_cursor - 1);
+        self.delete_agent_input_selection();
+    }
+
+    fn set_agent_input_cursor(&mut self, cursor: usize, select: bool) {
+        if select {
+            self.agent_input_anchor
+                .get_or_insert(self.agent_input_cursor);
+        } else {
+            self.agent_input_anchor = None;
+        }
+        self.agent_input_cursor = cursor.min(self.agent_input.chars().count());
+    }
+
+    fn move_agent_input_cursor(&mut self, delta: isize, select: bool) {
+        let cursor = if delta < 0 {
+            self.agent_input_cursor.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.agent_input_cursor
+                .saturating_add(delta as usize)
+                .min(self.agent_input.chars().count())
+        };
+        self.set_agent_input_cursor(cursor, select);
     }
 
     fn enqueue_agent_prompt(&mut self, prompt: String) {
@@ -2615,6 +2832,8 @@ impl Editor {
             self.active = index;
             self.update_active_split_buffer();
             self.agent_input = prompt;
+            self.agent_input_cursor = self.agent_input.chars().count();
+            self.agent_input_anchor = None;
             self.agent_messages.push(AgentMessage {
                 text: "! Give the untitled file a name, then send again".into(),
                 path: None,
@@ -2630,6 +2849,8 @@ impl Editor {
             let name = buffer.name();
             if let Err(error) = buffer.save() {
                 self.agent_input = prompt;
+                self.agent_input_cursor = self.agent_input.chars().count();
+                self.agent_input_anchor = None;
                 self.agent_messages.push(AgentMessage {
                     text: format!("! Could not synchronize {name}: {error}"),
                     path: None,
@@ -3345,6 +3566,7 @@ impl Editor {
             "  Alt+Left / Alt+Right                  Switch tabs",
             "",
             "Editing",
+            "  Ctrl+A                                Select all",
             "  Ctrl+C / Ctrl+X / Ctrl+V              Copy / cut / paste",
             "  Ctrl+Z / Ctrl+Y                       Undo / redo",
             "  Tab / Shift+Tab                       Indent / unindent",
@@ -3503,15 +3725,20 @@ impl Editor {
         let Some(area) = self.agent_area else {
             return;
         };
+        let input_width = usize::from(area.width.saturating_sub(4).max(1));
+        let input_lines = wrap_agent_text(&self.agent_input, input_width).len().max(1);
+        let input_height = (input_lines as u16).saturating_add(2).clamp(3, 8);
         let sections = Layout::vertical([
             Constraint::Min(3),
-            Constraint::Length(3),
+            Constraint::Length(input_height),
             Constraint::Length(2),
         ])
         .split(area);
+        self.agent_input_area = Some(sections[1]);
         let visible = usize::from(sections[0].height.saturating_sub(2));
         let content_width = usize::from(sections[0].width.saturating_sub(10).max(1));
-        let mut transcript = Vec::<(Line<'static>, Option<PathBuf>)>::new();
+        let mut transcript = Vec::<(&str, Color, Color, String, Option<PathBuf>, usize)>::new();
+        self.agent_transcript_text.clear();
         for message in &self.agent_messages {
             let (label, color, background) = match message.kind {
                 AgentMessageKind::Human => ("YOU   ", theme::BLUE, theme::SURFACE0),
@@ -3523,16 +3750,16 @@ impl Editor {
                 .into_iter()
                 .enumerate()
             {
+                let offset = self.agent_transcript_text.chars().count();
+                self.agent_transcript_text.push_str(&text);
+                self.agent_transcript_text.push('\n');
                 transcript.push((
-                    Line::from(vec![
-                        Span::styled(
-                            if index == 0 { label } else { "      " },
-                            Style::default().fg(color).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(text, Style::default().fg(theme::TEXT)),
-                    ])
-                    .style(Style::default().bg(background)),
+                    if index == 0 { label } else { "      " },
+                    color,
+                    background,
+                    text,
                     message.path.clone(),
+                    offset,
                 ));
             }
         }
@@ -3542,18 +3769,43 @@ impl Editor {
             .len()
             .saturating_sub(visible)
             .saturating_sub(self.agent_scroll);
+        self.agent_transcript_hits.clear();
+        let transcript_selection = self.agent_transcript_selection();
         let lines = transcript
             .iter()
             .skip(start)
             .take(visible)
             .enumerate()
-            .map(|(offset, (line, path))| {
-                let row = sections[0].y + 1 + offset as u16;
-                if let Some(path) = path {
-                    self.agent_hits.push((row, path.clone()));
-                }
-                line.clone()
-            })
+            .map(
+                |(visible_offset, (label, color, background, text, path, text_offset))| {
+                    let row = sections[0].y + 1 + visible_offset as u16;
+                    if let Some(path) = path {
+                        self.agent_hits.push((row, path.clone()));
+                    }
+                    self.agent_transcript_hits
+                        .push((row, *text_offset, text.clone()));
+                    let mut spans = vec![Span::styled(
+                        *label,
+                        Style::default().fg(*color).add_modifier(Modifier::BOLD),
+                    )];
+                    for (character_offset, character) in text.chars().enumerate() {
+                        let position = *text_offset + character_offset;
+                        let selected =
+                            transcript_selection.is_some_and(|(selection_start, selection_end)| {
+                                position >= selection_start && position < selection_end
+                            });
+                        spans.push(Span::styled(
+                            character.to_string(),
+                            if selected {
+                                Style::default().bg(theme::BLUE).fg(theme::BASE)
+                            } else {
+                                Style::default().fg(theme::TEXT)
+                            },
+                        ));
+                    }
+                    Line::from(spans).style(Style::default().bg(*background))
+                },
+            )
             .collect::<Vec<_>>();
         let status = match &self.agent_backend_status {
             BuiltinAgentStatus::Idle => "Agent",
@@ -3576,23 +3828,68 @@ impl Editor {
                 ),
             sections[0],
         );
-        let input = format!(
-            "> {}{}\nEnter send   Shift+Enter newline   Tab document",
-            self.agent_input,
-            if self.agent_panel_focused { "_" } else { "" }
-        );
+        let selection = self.agent_input_selection();
+        let mut input_lines = Vec::<Line<'static>>::new();
+        let mut input_spans = vec![Span::styled("> ", Style::default().fg(theme::MAUVE))];
+        let mut input_column = 2;
+        for (index, character) in self.agent_input.chars().enumerate() {
+            if self.agent_panel_focused && index == self.agent_input_cursor {
+                if input_column >= input_width {
+                    input_lines.push(Line::from(std::mem::take(&mut input_spans)));
+                    input_column = 0;
+                }
+                input_spans.push(Span::styled("▏", Style::default().fg(theme::GREEN)));
+                input_column += 1;
+            }
+            if character == '\n' {
+                input_lines.push(Line::from(std::mem::take(&mut input_spans)));
+                input_column = 0;
+                continue;
+            }
+            let character_text = character.to_string();
+            let character_width = UnicodeWidthStr::width(character_text.as_str());
+            if input_column > 0 && input_column + character_width > input_width {
+                input_lines.push(Line::from(std::mem::take(&mut input_spans)));
+                input_column = 0;
+            }
+            let selected = selection.is_some_and(|(start, end)| index >= start && index < end);
+            input_spans.push(Span::styled(
+                character_text,
+                if selected {
+                    Style::default().bg(theme::BLUE).fg(theme::BASE)
+                } else {
+                    Style::default().fg(theme::TEXT)
+                },
+            ));
+            input_column += character_width;
+        }
+        if self.agent_panel_focused && self.agent_input_cursor == self.agent_input.chars().count() {
+            if input_column >= input_width {
+                input_lines.push(Line::from(std::mem::take(&mut input_spans)));
+            }
+            input_spans.push(Span::styled("▏", Style::default().fg(theme::GREEN)));
+        }
+        input_lines.push(Line::from(input_spans));
+        let total_input_lines = input_lines.len();
+        let visible_input_lines = usize::from(sections[1].height.saturating_sub(2).max(1));
+        let input_start = total_input_lines.saturating_sub(visible_input_lines);
         frame.render_widget(
-            Paragraph::new(input)
-                .style(Style::default().bg(theme::BASE).fg(theme::TEXT))
-                .block(
-                    Block::bordered()
-                        .title(" Prompt ")
-                        .border_style(Style::default().fg(if self.agent_panel_focused {
-                            theme::GREEN
-                        } else {
-                            theme::SURFACE1
-                        })),
-                ),
+            Paragraph::new(
+                input_lines
+                    .into_iter()
+                    .skip(input_start)
+                    .collect::<Vec<_>>(),
+            )
+            .style(Style::default().bg(theme::BASE).fg(theme::TEXT))
+            .block(
+                Block::bordered()
+                    .title(" Prompt — Enter send · Shift+Enter newline · Tab document ")
+                    .border_style(Style::default().fg(if self.agent_panel_focused {
+                        theme::GREEN
+                    } else {
+                        theme::SURFACE1
+                    })),
+            ),
             sections[1],
         );
         frame.render_widget(
@@ -4325,6 +4622,42 @@ fn wrap_agent_text(text: &str, width: usize) -> Vec<String> {
     wrapped
 }
 
+fn agent_input_char_at(
+    text: &str,
+    width: usize,
+    visible_height: usize,
+    clicked_row: usize,
+    clicked_column: usize,
+) -> usize {
+    let width = width.max(1);
+    let mut rows = vec![vec![(2.min(width), 0)]];
+    let mut column = 2.min(width);
+    for (index, character) in text.chars().enumerate() {
+        if character == '\n' {
+            rows.push(vec![(0, index + 1)]);
+            column = 0;
+            continue;
+        }
+        let character_width = UnicodeWidthStr::width(character.to_string().as_str());
+        if column > 0 && column + character_width > width {
+            rows.push(vec![(0, index)]);
+            column = 0;
+        }
+        column = (column + character_width).min(width);
+        rows.last_mut()
+            .expect("input always has a row")
+            .push((column, index + 1));
+    }
+    let first_visible = rows.len().saturating_sub(visible_height.max(1));
+    let row = rows
+        .get(first_visible + clicked_row)
+        .or_else(|| rows.last())
+        .expect("input always has a row");
+    row.iter()
+        .min_by_key(|(column, _)| column.abs_diff(clicked_column))
+        .map_or(0, |(_, index)| *index)
+}
+
 fn key_event_name(key: &KeyEvent) -> String {
     let mut parts = Vec::new();
     if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -4467,8 +4800,8 @@ mod input_tests {
     use crate::explorer::Explorer;
 
     use super::{
-        control_letter, key_event_name, valid_entry_name, AgentMessage, AgentMessageKind, Command,
-        Editor,
+        agent_input_char_at, control_letter, key_event_name, valid_entry_name, AgentMessage,
+        AgentMessageKind, Command, Editor,
     };
 
     #[test]
@@ -4521,6 +4854,22 @@ mod input_tests {
             .key(KeyEvent::new(KeyCode::Char('}'), KeyModifiers::NONE))
             .unwrap();
         assert_eq!(editor.current().text(), "{\n}");
+    }
+
+    #[test]
+    fn ctrl_a_selects_all_document_text() {
+        let mut editor = Editor::new(Vec::new());
+        editor.current_mut().insert("Hello, 🌍!\nSecond line");
+        editor.current_mut().move_horizontal(-4, false);
+
+        editor
+            .key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+            .unwrap();
+
+        assert_eq!(
+            editor.current().selected_text().as_deref(),
+            Some("Hello, 🌍!\nSecond line")
+        );
     }
 
     #[test]
@@ -5052,6 +5401,51 @@ mod input_tests {
     }
 
     #[test]
+    fn agent_prompt_wraps_and_supports_selection_copy_and_replace() {
+        let mut editor = Editor::new(Vec::new());
+        editor.agent_panel_visible = true;
+        editor.agent_panel_focused = true;
+        editor.insert_agent_input("hello 🌍 and a prompt long enough to wrap");
+        editor
+            .agent_panel_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(
+            editor.selected_agent_input().as_deref(),
+            Some("hello 🌍 and a prompt long enough to wrap")
+        );
+        editor.clipboard = Some("replacement".into());
+        editor
+            .agent_panel_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(editor.agent_input, "replacement");
+
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        editor.agent_input = "word ".repeat(30);
+        editor.agent_input_cursor = editor.agent_input.chars().count();
+        terminal.draw(|frame| editor.render(frame)).unwrap();
+        assert!(editor.agent_input_area.expect("input area").height > 3);
+    }
+
+    #[test]
+    fn agent_transcript_selection_returns_only_dragged_text() {
+        let mut editor = Editor::new(Vec::new());
+        editor.agent_transcript_text = "first response\nsecond response\n".into();
+        editor.agent_transcript_anchor = Some(6);
+        editor.agent_transcript_cursor = Some(14);
+        assert_eq!(
+            editor.selected_agent_transcript().as_deref(),
+            Some("response")
+        );
+    }
+
+    #[test]
+    fn mouse_position_maps_into_wrapped_agent_prompt() {
+        assert_eq!(agent_input_char_at("abcdef", 5, 3, 1, 2), 5);
+        assert_eq!(agent_input_char_at("ab\ncd", 8, 3, 1, 1), 4);
+    }
+
+    #[test]
     fn agent_conversation_labels_roles_and_scrolls_independently() {
         let mut editor = Editor::new(Vec::new());
         editor.agent_panel_visible = true;
@@ -5097,7 +5491,7 @@ mod input_tests {
             .unwrap();
         assert_eq!(editor.agent_scroll, 3);
         editor
-            .agent_panel_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))
+            .agent_panel_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL))
             .unwrap();
         assert_eq!(editor.agent_scroll, 0);
     }

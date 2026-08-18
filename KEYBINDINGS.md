@@ -6,6 +6,7 @@ Press F1 in TTED for the built-in quick reference. The most common bindings are:
 |---|---|
 | Arrows, Home/End, Page Up/Down | Navigate; hold Shift to select |
 | Ctrl+N / Ctrl+S / Ctrl+Shift+S | New, Save, Save As |
+| Ctrl+A | Select all text in the active document |
 | Ctrl+C / Ctrl+X / Ctrl+V | Copy, cut, paste |
 | Ctrl+Z / Ctrl+Y | Undo, redo |
 | Ctrl+F / Ctrl+P | Find/replace, Quick Open |
@@ -40,4 +41,7 @@ In Agent chat, Enter sends, Shift+Enter adds a line, Esc stops active work (or
 returns to the document when idle), Ctrl+R retries, Ctrl+L starts a new
 conversation, Ctrl+K clears the visible chat, and Tab returns focus to the
 document without closing the panel. Ctrl+G focuses the open panel again. Mouse
-wheel or Page Up/Down scrolls chat history; Home/End jumps oldest/latest.
+wheel or Page Up/Down scrolls chat history; Ctrl+Home/End jumps oldest/latest.
+Drag over conversation text and press Ctrl+C to copy the selection.
+The prompt supports arrows, Shift+Left/Right selection, Ctrl+A, Ctrl+C,
+Ctrl+X, Ctrl+V, terminal paste, and wrapped multiline input.

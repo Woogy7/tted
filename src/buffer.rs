@@ -409,6 +409,13 @@ impl Buffer {
             .map(|(start, end)| self.text.slice(start..end).to_string())
     }
 
+    pub fn select_all(&mut self) {
+        self.edit_group = None;
+        self.anchor = Some(0);
+        self.cursor = self.text.len_chars();
+        self.preferred_col = None;
+    }
+
     pub fn cut_selection(&mut self) -> Option<String> {
         let text = self.selected_text()?;
         self.checkpoint();

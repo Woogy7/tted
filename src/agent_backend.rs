@@ -77,6 +77,11 @@ fn run_codex(workspace: PathBuf, commands: Receiver<BackendCommand>, events: Sen
     process
         .args(["app-server", "--stdio"])
         .current_dir(&workspace)
+        // These describe TTED's parent sandbox. Passing them to the nested
+        // Codex process makes its file tool try to initialize Bubblewrap
+        // again, which fails in restricted containers while configuring lo.
+        .env_remove("CODEX_PERMISSION_PROFILE")
+        .env_remove("CODEX_SANDBOX_NETWORK_DISABLED")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -218,7 +223,7 @@ fn start_turn(
             "threadId":thread_id,
             "input":[{"type":"text","text":prompt}],
             "cwd":workspace,
-            "approvalPolicy":"untrusted",
+            "approvalPolicy":"on-request",
             "sandboxPolicy":sandbox
         }}),
     );
@@ -471,7 +476,7 @@ mod tests {
         let request: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(
             request.pointer("/params/approvalPolicy"),
-            Some(&json!("untrusted"))
+            Some(&json!("on-request"))
         );
         assert_eq!(
             request.pointer("/params/sandboxPolicy/type"),

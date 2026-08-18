@@ -57,7 +57,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/Woogy7/t
 | Arrow keys, Home, End | Move cursor |
 | Page Up / Page Down | Move one screen |
 | Shift + navigation | Select text |
-| Ctrl+C / Ctrl+X / Ctrl+V | Copy, cut, or paste the TTED clipboard |
+| Ctrl+A / Ctrl+C / Ctrl+X / Ctrl+V | Select all, copy, cut, or paste the TTED clipboard |
 | Ctrl+S | Save |
 | Ctrl+N | Create and open a new workspace file |
 | Ctrl+Shift+S | Save As |
