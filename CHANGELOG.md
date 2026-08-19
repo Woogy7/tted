@@ -2,7 +2,7 @@
 
 All notable changes are documented here.
 
-## 0.1.0 - Unreleased
+## 0.1.0 - 2026-08-19
 
 - Conventional Unicode-aware rope editing, mouse selection, tabs, explorer,
   quick open, search/replace, syntax highlighting, and Markdown reader.
