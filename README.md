@@ -32,7 +32,127 @@ Herdr without requiring an AI agent.
 - a permission-scoped structured agent API and optional integrated Agent panel
 - optional TOML configuration for editing, keybindings, explorer, LSP, and agents
 
-## Build and run
+## Install on Linux
+
+The quickest installation method is the same on Ubuntu, Debian, Fedora, Arch,
+openSUSE, and most other Linux distributions:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/Woogy7/tted/main/install.sh | sh
+```
+
+Open a new terminal, then launch TTED in the current directory:
+
+```sh
+tted .
+```
+
+You can also open one or more files directly:
+
+```sh
+tted README.md
+tted src/main.rs src/editor.rs
+```
+
+The installer downloads a SHA-256-verified binary from the latest GitHub
+release. Before the first tagged release—or when no binary exists for the
+machine—it builds TTED from source with Cargo. It installs to
+`~/.local/bin/tted` for a normal user and adds that directory to PATH for new
+shells. When run as root, it installs to `/usr/local/bin/tted`.
+
+### Ubuntu and Debian
+
+For a released x86-64 or ARM64 build, the quick installer above only needs
+`curl` (or `wget` if the script is downloaded first):
+
+```sh
+sudo apt update
+sudo apt install -y curl
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/Woogy7/tted/main/install.sh | sh
+```
+
+To install the current development version from source:
+
+```sh
+sudo apt update
+sudo apt install -y build-essential curl
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+. "$HOME/.cargo/env"
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/Woogy7/tted/main/install.sh | sh -s -- --source
+```
+
+### Arch Linux and Manjaro
+
+```sh
+sudo pacman -S --needed curl
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/Woogy7/tted/main/install.sh | sh
+```
+
+For a source build, install Arch's Rust toolchain first:
+
+```sh
+sudo pacman -S --needed base-devel rust curl
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/Woogy7/tted/main/install.sh | sh -s -- --source
+```
+
+### Fedora, RHEL, and Rocky Linux
+
+```sh
+sudo dnf install -y curl
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/Woogy7/tted/main/install.sh | sh
+```
+
+For a source build:
+
+```sh
+sudo dnf install -y gcc rust cargo curl
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/Woogy7/tted/main/install.sh | sh -s -- --source
+```
+
+### openSUSE
+
+```sh
+sudo zypper install -y curl
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/Woogy7/tted/main/install.sh | sh
+```
+
+For a source build:
+
+```sh
+sudo zypper install -y gcc rust cargo curl
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/Woogy7/tted/main/install.sh | sh -s -- --source
+```
+
+### Alpine Linux
+
+The release archives target glibc Linux, so Alpine should build from source:
+
+```sh
+sudo apk add build-base cargo rust curl
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/Woogy7/tted/main/install.sh | sh -s -- --source
+```
+
+### Upgrade, customize, or uninstall
+
+Rerun the installer to upgrade. Install a particular release or choose another
+directory with:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/Woogy7/tted/main/install.sh | TTED_VERSION=v0.1.0 sh
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/Woogy7/tted/main/install.sh | TTED_INSTALL_DIR=/opt/tted/bin sudo -E sh
+```
+
+To uninstall a normal user installation:
+
+```sh
+rm "$HOME/.local/bin/tted"
+```
+
+TTED itself has no runtime service or AI dependency. Git features require
+`git`; LSP features require the language servers you choose; integrated Codex
+chat requires the optional Codex CLI.
+
+## Build and run from a checkout
 
 ```sh
 cargo build
@@ -43,12 +163,6 @@ cargo run -- file1.rs file2.rs
 
 With no filenames TTED opens an untitled buffer; Ctrl+S then prompts for a path.
 Passing a directory selects that workspace and opens its explorer.
-
-For released builds, download a platform archive or run:
-
-```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/Woogy7/tted/main/install.sh | sh
-```
 
 ## Keys
 

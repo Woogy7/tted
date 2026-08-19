@@ -28,7 +28,16 @@ jobs:
           target: ${{ matrix.target }}
           args: --locked --release
           strip: true
-      - run: tar -czf tted-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release tted
+      - name: Package binary and checksum
+        run: |
+          tar -czf tted-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release tted
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum tted-${{ matrix.target }}.tar.gz > tted-${{ matrix.target }}.tar.gz.sha256
+          else
+            shasum -a 256 tted-${{ matrix.target }}.tar.gz > tted-${{ matrix.target }}.tar.gz.sha256
+          fi
       - uses: softprops/action-gh-release@v2
         with:
-          files: tted-${{ matrix.target }}.tar.gz
+          files: |
+            tted-${{ matrix.target }}.tar.gz
+            tted-${{ matrix.target }}.tar.gz.sha256

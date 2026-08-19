@@ -33,8 +33,9 @@ Lightweight diagnostic logs default to `/tmp/tted-<pid>.log`.
 
 `tted .`, `tted README.md`, and multiple file arguments are supported. CI
 enforces format, tests, Clippy with warnings denied, and release builds. Tagged
-releases build Linux x86_64/ARM64 and macOS x86_64/ARM64 archives; `install.sh`
-installs them.
+releases build checksummed Linux x86_64/ARM64 and macOS x86_64/ARM64 archives.
+The installer verifies release checksums, falls back to a Cargo source build,
+and configures a normal user's PATH.
 
 ## Intentional limitations
 

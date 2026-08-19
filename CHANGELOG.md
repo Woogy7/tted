@@ -16,3 +16,5 @@ All notable changes are documented here.
   nested-container-safe workspace sandbox for routine Codex collaboration.
 - TOML configuration for editing, keybindings, explorer, LSP, and agent access.
 - Directory/file CLI workflow, CI, release packaging, and installer.
+- Checksummed release downloads, source-build fallback, automatic user PATH
+  setup, and distribution-specific Linux installation documentation.
