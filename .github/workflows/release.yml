@@ -2,6 +2,11 @@ name: Release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build
+        required: true
 
 permissions:
   contents: write
@@ -15,13 +20,15 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
           - os: macos-14
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: houseabsolute/actions-rust-cross@v1
         with:
           command: build
@@ -38,6 +45,7 @@ jobs:
           fi
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
           files: |
             tted-${{ matrix.target }}.tar.gz
             tted-${{ matrix.target }}.tar.gz.sha256
