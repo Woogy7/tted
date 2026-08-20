@@ -2,7 +2,7 @@
 
 All notable changes are documented here.
 
-## Unreleased
+## 0.1.1 - 2026-08-20
 
 - Make task-list checkboxes clickable and undoable in Markdown reading view.
 
