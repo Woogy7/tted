@@ -2,6 +2,10 @@
 
 All notable changes are documented here.
 
+## Unreleased
+
+- Make task-list checkboxes clickable and undoable in Markdown reading view.
+
 ## 0.1.0 - 2026-08-19
 
 - Conventional Unicode-aware rope editing, mouse selection, tabs, explorer,

@@ -732,6 +732,10 @@ impl Editor {
                     {
                         self.agent_panel_focused = false;
                         self.explorer.set_focused(false);
+                        let rendered_line =
+                            self.top_line + usize::from(mouse.row.saturating_sub(self.body.y));
+                        let rendered_column = usize::from(mouse.column.saturating_sub(self.body.x));
+                        self.toggle_markdown_task(rendered_line, rendered_column);
                     }
                     MouseEventKind::ScrollUp => self.top_line = self.top_line.saturating_sub(3),
                     MouseEventKind::ScrollDown => {
@@ -3212,6 +3216,41 @@ impl Editor {
             .saturating_sub(usize::from(self.body.height.max(1)))
     }
 
+    fn toggle_markdown_task(&mut self, rendered_line: usize, rendered_column: usize) {
+        if self.current().is_read_only() {
+            self.message = "This Markdown view is read-only".into();
+            return;
+        }
+        let document = crate::markdown::render_document(&self.current().text());
+        let Some(task) = document.tasks.into_iter().find(|task| {
+            task.rendered_line == rendered_line
+                && rendered_column >= task.rendered_column
+                && rendered_column < task.rendered_column + 3
+        }) else {
+            return;
+        };
+        let revision = self.current().revision();
+        let replacement = if task.checked { " " } else { "x" };
+        if self
+            .current_mut()
+            .apply_agent_edit(
+                revision,
+                task.source_marker_char,
+                task.source_marker_char + 1,
+                replacement,
+            )
+            .is_ok()
+        {
+            self.changed();
+            self.message = if task.checked {
+                "Markdown task unchecked"
+            } else {
+                "Markdown task checked"
+            }
+            .into();
+        }
+    }
+
     fn document_max_top(&self) -> usize {
         self.current()
             .len_lines()
@@ -5095,6 +5134,32 @@ mod input_tests {
             .unwrap();
         terminal.draw(|frame| editor.render(frame)).unwrap();
         assert_eq!(editor.top_line, 4);
+    }
+
+    #[test]
+    fn markdown_reading_view_checkboxes_toggle_source_and_undo() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("tasks.md");
+        fs::write(&path, "- [ ] first\n- [x] second\n").unwrap();
+        let mut editor = Editor::new(vec![path]);
+        editor.markdown_reading[0] = true;
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| editor.render(frame)).unwrap();
+
+        editor
+            .handle_event(Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: editor.body.x + 2,
+                row: editor.body.y,
+                modifiers: KeyModifiers::NONE,
+            }))
+            .unwrap();
+
+        assert_eq!(editor.current().text(), "- [x] first\n- [x] second\n");
+        assert!(editor.current().is_dirty());
+        editor.current_mut().undo();
+        assert_eq!(editor.current().text(), "- [ ] first\n- [x] second\n");
     }
 
     #[test]

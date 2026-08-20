@@ -16,7 +16,7 @@ Herdr without requiring an AI agent.
 - dirty indicators and protection against accidentally quitting with changes
 - reliable terminal cleanup through an RAII guard
 - file-aware syntax highlighting for common programming and markup languages
-- a read-only Markdown reading view toggled independently from source editing
+- a formatted Markdown reading view with clickable task checkboxes
 - a Catppuccin Mocha-inspired editor interface
 - a collapsible workspace tree with keyboard and mouse navigation
 - grapheme-aware movement and deletion with terminal-cell-aware cursor placement
@@ -211,6 +211,10 @@ press Enter to open the selection.
 Ctrl+F opens centered Find and Replace. Enter and Shift+Enter move to the next
 and previous matches, Tab switches fields, Alt+C toggles case sensitivity,
 Ctrl+R replaces the current match, and Ctrl+Shift+R replaces all matches.
+
+In Markdown reading view, click a rendered `[ ]` or `[x]` task checkbox to
+toggle the corresponding source item. Checkbox changes are normal undoable,
+saveable edits; the rest of the formatted view remains non-editable.
 
 F2 opens the Command Palette reliably in every terminal. Ctrl+Shift+P also works
 when the terminal distinguishes it from Ctrl+P. Commands can be found by fuzzy title or

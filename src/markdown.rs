@@ -6,8 +6,26 @@ use ratatui::{
 
 use crate::theme;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskMarker {
+    pub rendered_line: usize,
+    pub rendered_column: usize,
+    pub source_marker_char: usize,
+    pub checked: bool,
+}
+
+pub struct RenderedMarkdown {
+    pub lines: Vec<Line<'static>>,
+    pub tasks: Vec<TaskMarker>,
+}
+
 pub fn render(source: &str) -> Vec<Line<'static>> {
+    render_document(source).lines
+}
+
+pub fn render_document(source: &str) -> RenderedMarkdown {
     let mut lines = Vec::new();
+    let mut tasks = Vec::new();
     let mut current = Vec::new();
     let mut style = Style::default();
     let mut list_depth = 0usize;
@@ -16,7 +34,7 @@ pub fn render(source: &str) -> Vec<Line<'static>> {
         lines.push(Line::from(std::mem::take(current)));
     };
 
-    for event in Parser::new_ext(source, Options::all()) {
+    for (event, source_range) in Parser::new_ext(source, Options::all()).into_offset_iter() {
         match event {
             Event::Start(Tag::Heading { level, .. }) => {
                 style = heading_style(level);
@@ -76,6 +94,26 @@ pub fn render(source: &str) -> Vec<Line<'static>> {
                 ));
             }
             Event::TaskListMarker(done) => {
+                let rendered_column = current
+                    .iter()
+                    .map(|span| unicode_width::UnicodeWidthStr::width(span.content.as_ref()))
+                    .sum();
+                if let Some(relative_marker) =
+                    source[source_range.clone()]
+                        .char_indices()
+                        .find_map(|(index, character)| {
+                            matches!(character, ' ' | 'x' | 'X').then_some(index)
+                        })
+                {
+                    tasks.push(TaskMarker {
+                        rendered_line: lines.len(),
+                        rendered_column,
+                        source_marker_char: source[..source_range.start + relative_marker]
+                            .chars()
+                            .count(),
+                        checked: done,
+                    });
+                }
                 current.push(Span::raw(if done { "[x] " } else { "[ ] " }))
             }
             Event::Html(html) | Event::InlineHtml(html) => current.push(Span::styled(
@@ -91,7 +129,7 @@ pub fn render(source: &str) -> Vec<Line<'static>> {
     if lines.is_empty() {
         lines.push(Line::default());
     }
-    lines
+    RenderedMarkdown { lines, tasks }
 }
 
 fn heading_style(level: HeadingLevel) -> Style {
@@ -117,5 +155,19 @@ mod tests {
         assert!(text.contains("Title"));
         assert!(text.contains("• one"));
         assert!(text.contains("• two"));
+    }
+
+    #[test]
+    fn task_markers_retain_rendered_and_unicode_source_positions() {
+        let source = "é\n\n- [ ] first\n- [x] second\n";
+        let document = render_document(source);
+        assert_eq!(document.tasks.len(), 2);
+        assert_eq!(document.tasks[0].rendered_column, 2);
+        assert_eq!(
+            source.chars().nth(document.tasks[0].source_marker_char),
+            Some(' ')
+        );
+        assert!(!document.tasks[0].checked);
+        assert!(document.tasks[1].checked);
     }
 }
