@@ -6,6 +6,7 @@ pub mod editor;
 pub mod explorer;
 mod file_io;
 pub mod git;
+mod language_edits;
 pub mod lsp;
 pub mod markdown;
 pub mod quick_open;

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     io::{self, Write},
     path::{Component, Path, PathBuf},
@@ -27,7 +28,7 @@ use crate::config::Config;
 use crate::explorer::{Explorer, ExplorerAction};
 use crate::file_io::{file_stamp, FileStamp};
 use crate::git::GitService;
-use crate::lsp::{Diagnostic, LspEvent, LspService};
+use crate::lsp::{Diagnostic, EditVersions, LspEvent, LspService};
 use crate::quick_open::QuickOpen;
 use crate::syntax::SyntaxCache;
 use crate::theme;
@@ -123,6 +124,7 @@ pub struct Editor {
     config: Config,
     lsp: Option<LspService>,
     lsp_extension: Option<String>,
+    lsp_synced: HashMap<u64, u64>,
     lsp_dirty_since: Option<Instant>,
     problems_visible: bool,
     problems_selected: usize,
@@ -210,6 +212,7 @@ impl Editor {
             config,
             lsp: None,
             lsp_extension: None,
+            lsp_synced: HashMap::new(),
             lsp_dirty_since: None,
             problems_visible: false,
             problems_selected: 0,
@@ -462,7 +465,9 @@ impl Editor {
                         .copied()
                     {
                         self.active = tab;
+                        self.update_active_split_buffer();
                         self.reset_view();
+                        self.activate_lsp_for_current();
                     }
                 }
                 MouseEventKind::Down(MouseButton::Left)
@@ -1328,6 +1333,7 @@ impl Editor {
             Command::LspSignature => self.request_lsp("signature"),
             Command::LspRestart => {
                 self.lsp = None;
+                self.lsp_synced.clear();
                 self.lsp_extension = None;
                 self.activate_lsp_for_current();
             }
@@ -1367,6 +1373,7 @@ impl Editor {
                     self.syntax_cache = SyntaxCache::default();
                 }
                 self.lsp = None;
+                self.lsp_synced.clear();
                 self.lsp_extension = None;
                 self.activate_lsp_for_current();
                 self.message = "Configuration reloaded".into();
@@ -1811,6 +1818,10 @@ impl Editor {
     }
 
     fn close_current_tab(&mut self) {
+        if let (Some(lsp), Some(path)) = (&self.lsp, self.current().path()) {
+            lsp.close(path.to_path_buf());
+        }
+        self.lsp_synced.remove(&self.current().id());
         self.split = None;
         self.buffers.remove(self.active);
         self.markdown_reading.remove(self.active);
@@ -1822,6 +1833,7 @@ impl Editor {
         self.close_armed = None;
         self.message = "Closed tab".into();
         self.reset_view();
+        self.activate_lsp_for_current();
     }
 
     fn request_close_tab(&mut self, tab: usize) {
@@ -1948,11 +1960,13 @@ impl Editor {
     }
 
     fn request_lsp(&mut self, request: &str) {
+        self.activate_lsp_for_current();
+        self.sync_lsp_change();
         let Some(path) = self.current().path().map(PathBuf::from) else {
             self.message = "LSP actions require a saved file".into();
             return;
         };
-        let (line, column) = self.current().cursor_line_col();
+        let (line, column) = self.current().cursor_utf16_position();
         let Some(lsp) = &self.lsp else {
             self.message = "No language server configured for this file".into();
             return;
@@ -1963,7 +1977,7 @@ impl Editor {
             "completion" => lsp.completion(path, line, column),
             "references" => lsp.references(path, line, column),
             "code actions" => lsp.code_actions(path, line, column),
-            "format" => lsp.formatting(path),
+            "format" => lsp.formatting(path, self.lsp_edit_versions()),
             "document symbols" => lsp.document_symbols(path),
             "signature" => lsp.signature(path, line, column),
             _ => return,
@@ -1993,6 +2007,7 @@ impl Editor {
                     self.lsp_prompt = Some(prompt);
                     return Ok(false);
                 }
+                self.sync_lsp_change();
                 let Some(lsp) = &self.lsp else {
                     self.message = "No language server configured".into();
                     return Ok(false);
@@ -2002,8 +2017,8 @@ impl Editor {
                         let Some(path) = self.current().path().map(PathBuf::from) else {
                             return Ok(false);
                         };
-                        let (line, column) = self.current().cursor_line_col();
-                        lsp.rename(path, line, column, prompt.input);
+                        let (line, column) = self.current().cursor_utf16_position();
+                        lsp.rename(path, line, column, prompt.input, self.lsp_edit_versions());
                     }
                     LspPromptKind::WorkspaceSymbols => lsp.workspace_symbols(prompt.input),
                 }
@@ -2036,7 +2051,7 @@ impl Editor {
         self.problems_selected = index;
         self.open_path(item.path);
         self.current_mut()
-            .set_cursor_line_col(item.line, item.column, false);
+            .set_cursor_utf16_position(item.line, item.column);
         self.ensure_visible();
         self.message = item.message;
     }
@@ -2080,12 +2095,17 @@ impl Editor {
             .and_then(|value| value.to_str())
             .map(str::to_owned)
         else {
+            self.lsp = None;
+            self.lsp_extension = None;
+            self.lsp_synced.clear();
             return;
         };
         if self.lsp_extension.as_deref() == Some(&extension) {
+            self.sync_lsp_change();
             return;
         }
         self.lsp = None;
+        self.lsp_synced.clear();
         self.lsp_extension = None;
         let Some(server) = self.config.language_server(&path).cloned() else {
             return;
@@ -2100,30 +2120,56 @@ impl Editor {
         }
     }
 
+    fn lsp_edit_versions(&self) -> EditVersions {
+        self.buffers
+            .iter()
+            .filter_map(|buffer| {
+                Some((
+                    buffer.path()?.to_path_buf(),
+                    (buffer.id(), buffer.revision()),
+                ))
+            })
+            .collect()
+    }
+
     fn sync_lsp_change(&mut self) {
         self.lsp_dirty_since = None;
-        let Some(path) = self.current().path().map(PathBuf::from) else {
-            return;
-        };
-        let text = self.current().text();
-        let version = self.current().revision() as i64 + 1;
         if let Some(lsp) = &self.lsp {
-            lsp.change(path, version, text);
+            for buffer in &self.buffers {
+                if self.lsp_synced.get(&buffer.id()) == Some(&buffer.revision()) {
+                    continue;
+                }
+                if let Some(path) = buffer.path().filter(|path| {
+                    path.extension().and_then(|s| s.to_str()) == self.lsp_extension.as_deref()
+                }) {
+                    lsp.change(
+                        path.to_path_buf(),
+                        buffer.revision() as i64 + 1,
+                        buffer.text(),
+                    );
+                }
+            }
         }
     }
 
     fn poll_lsp(&mut self) -> bool {
+        if self.external_prompt.is_some()
+            || self.overwrite_prompt.is_some()
+            || self.path_prompt.is_some()
+            || self.close_armed.is_some()
+            || self.delete_confirm.is_some()
+            || self.explorer_prompt.is_some()
+            || self.git_discard_confirm.is_some()
+            || self.git_commit_prompt.is_some()
+        {
+            return false;
+        }
         let events = self.lsp.as_mut().map(LspService::poll).unwrap_or_default();
         let changed = !events.is_empty();
         for event in events {
             match event {
                 LspEvent::Ready => {
-                    if let Some(path) = self.current().path().map(PathBuf::from) {
-                        let text = self.current().text();
-                        if let Some(lsp) = &self.lsp {
-                            lsp.open(path, text);
-                        }
-                    }
+                    self.sync_lsp_change();
                     self.message = "Language server ready".into();
                 }
                 LspEvent::Diagnostics { .. } => {
@@ -2144,7 +2190,7 @@ impl Editor {
                             .push((current, current_line, current_column));
                     }
                     self.open_path(path);
-                    self.current_mut().set_cursor_line_col(line, column, false);
+                    self.current_mut().set_cursor_utf16_position(line, column);
                     self.ensure_visible();
                 }
                 LspEvent::Completions(items) => {
@@ -2164,17 +2210,19 @@ impl Editor {
                     };
                     self.open_read_only("References", text);
                 }
-                LspEvent::WorkspaceEdits(changes) => {
-                    let mut files = 0;
-                    for (path, edits) in changes {
-                        self.open_path(path);
-                        self.current_mut().apply_text_edits(&edits);
-                        files += 1;
+                LspEvent::WorkspaceEdits(changes, versions) => {
+                    match crate::language_edits::apply(&mut self.buffers, changes, &versions) {
+                        Ok(files) => {
+                            self.markdown_reading.resize(self.buffers.len(), false);
+                            if files > 0 {
+                                self.changed();
+                                self.sync_lsp_change();
+                            }
+                            self.message =
+                                format!("Applied language-server edits to {files} file(s)");
+                        }
+                        Err(error) => self.message = format!("Language edits not applied: {error}"),
                     }
-                    if files > 0 {
-                        self.changed();
-                    }
-                    self.message = format!("Applied language-server edits to {files} file(s)");
                 }
                 LspEvent::Information(text) => self.hover_popup = Some(text),
             }

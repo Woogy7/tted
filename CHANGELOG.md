@@ -4,6 +4,10 @@ All notable changes are documented here.
 
 ## Unreleased
 
+- Reject stale or invalid language-server edit batches before changing any buffer.
+  Synchronize all matching open documents, preserve pending edits across tab switches,
+  handle close/reopen, and use UTF-16 positions and escaped file URIs.
+
 - Cache syntax parser checkpoints and visible styles, yielding between chunks
   when scrolling deep into a file. Very long lines omit syntax colors.
 - Cache search matches by buffer revision and correctly map expanding Unicode

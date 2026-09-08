@@ -334,48 +334,86 @@ impl Buffer {
         matches.len()
     }
 
-    pub fn apply_text_edits(&mut self, edits: &[(usize, usize, usize, usize, String)]) {
-        if self.read_only || edits.is_empty() {
-            return;
+    pub fn apply_text_edits(
+        &mut self,
+        edits: &[(usize, usize, usize, usize, String)],
+    ) -> Result<(), &'static str> {
+        let ranges = self.validate_text_edits(edits)?;
+        let mut cursor = self.cursor;
+        for (start, end, text) in ranges.iter().rev() {
+            let inserted = text.chars().count();
+            if cursor >= *end {
+                cursor = cursor - (end - start) + inserted;
+            } else if cursor > *start {
+                cursor = start + (cursor - start).min(inserted);
+            }
+        }
+        self.replace_ranges(self.revision, &ranges)?;
+        self.cursor = self.grapheme_floor(cursor.min(self.text.len_chars()));
+        Ok(())
+    }
+
+    pub(crate) fn validate_text_edits(
+        &self,
+        edits: &[(usize, usize, usize, usize, String)],
+    ) -> Result<Vec<(usize, usize, String)>, &'static str> {
+        if self.read_only {
+            return Err("buffer is read-only");
         }
         let mut ranges = edits
             .iter()
-            .map(|(start_line, start_utf16, end_line, end_utf16, text)| {
-                (
-                    self.utf16_position_to_char(*start_line, *start_utf16),
-                    self.utf16_position_to_char(*end_line, *end_utf16),
-                    text,
-                )
+            .map(|(line, column, end_line, end_column, text)| {
+                Ok((
+                    self.utf16_position_to_char(*line, *column)
+                        .ok_or("invalid start position")?,
+                    self.utf16_position_to_char(*end_line, *end_column)
+                        .ok_or("invalid end position")?,
+                    text.replace("\r\n", "\n"),
+                ))
             })
-            .collect::<Vec<_>>();
-        ranges.sort_unstable_by_key(|range| std::cmp::Reverse(range.0));
-        self.checkpoint();
-        for (start, end, text) in ranges {
-            if start <= end && end <= self.text.len_chars() {
-                self.text.remove(start..end);
-                self.text.insert(start, text);
-            }
+            .collect::<Result<Vec<_>, &'static str>>()?;
+        ranges.sort_by_key(|range| range.0);
+        if ranges.iter().any(|(start, end, _)| start > end)
+            || ranges
+                .windows(2)
+                .any(|pair| pair[0].1 > pair[1].0 || pair[0].0 == pair[1].0)
+        {
+            return Err("invalid or overlapping edits");
         }
-        self.cursor = self.cursor.min(self.text.len_chars());
-        self.anchor = None;
-        self.finish_edit();
+        Ok(ranges)
     }
 
-    fn utf16_position_to_char(&self, line: usize, utf16_column: usize) -> usize {
-        let line = line.min(self.text.len_lines().saturating_sub(1));
+    fn utf16_position_to_char(&self, line: usize, utf16_column: usize) -> Option<usize> {
+        if line >= self.text.len_lines() {
+            return None;
+        }
         let start = self.text.line_to_char(line);
         let content = self.text.line(line).to_string();
         let mut units = 0;
         let mut chars = 0;
-        for character in content.chars() {
-            let next = units + character.len_utf16();
-            if next > utf16_column {
-                break;
+        for character in content.trim_end_matches(['\r', '\n']).chars() {
+            if units == utf16_column {
+                return Some(start + chars);
             }
-            units = next;
+            units += character.len_utf16();
             chars += 1;
+            if units > utf16_column {
+                return None;
+            }
         }
-        start + chars
+        (units == utf16_column).then_some(start + chars)
+    }
+
+    pub fn cursor_utf16_position(&self) -> (usize, usize) {
+        let (line, _) = self.cursor_line_col();
+        (line, self.current_line_prefix().encode_utf16().count())
+    }
+
+    pub fn set_cursor_utf16_position(&mut self, line: usize, column: usize) {
+        if let Some(position) = self.utf16_position_to_char(line, column) {
+            self.begin_move(false);
+            self.cursor = self.grapheme_floor(position);
+        }
     }
 
     fn search_ranges(&self, query: &str, case_sensitive: bool) -> Rc<Vec<(usize, usize)>> {
@@ -1193,7 +1231,9 @@ mod tests {
     #[test]
     fn lsp_text_edits_use_utf16_columns_and_are_atomic() {
         let mut buffer = Buffer::from_text("a😀b\nsecond\n".into(), None, false);
-        buffer.apply_text_edits(&[(0, 1, 0, 3, "X".into()), (1, 0, 1, 6, "line".into())]);
+        buffer
+            .apply_text_edits(&[(0, 1, 0, 3, "X".into()), (1, 0, 1, 6, "line".into())])
+            .unwrap();
         assert_eq!(buffer.text(), "aXb\nline\n");
         buffer.undo();
         assert_eq!(buffer.text(), "a😀b\nsecond\n");
@@ -1413,5 +1453,30 @@ mod search_tests {
         fs::write(&path, "none").unwrap();
         buffer.reload_from_disk().unwrap();
         assert_eq!(buffer.search_status("match", true).1, 0);
+    }
+}
+
+#[cfg(test)]
+mod language_position_tests {
+    use super::*;
+    #[test]
+    fn unicode_positions_and_invalid_batches_are_safe() {
+        let mut buffer = Buffer::empty();
+        buffer.insert("a😀b\nline");
+        buffer.set_cursor_line_col(0, 2, false);
+        assert_eq!(buffer.cursor_utf16_position(), (0, 3));
+        buffer.set_cursor_utf16_position(0, 3);
+        assert_eq!(buffer.cursor_line_col(), (0, 2));
+        let before = buffer.text();
+        let revision = buffer.revision();
+        assert!(buffer
+            .apply_text_edits(&[(0, 0, 0, 1, "x".into()), (0, 2, 0, 3, "y".into())])
+            .is_err());
+        assert_eq!(buffer.text(), before);
+        assert_eq!(buffer.revision(), revision);
+        assert!(buffer
+            .apply_text_edits(&[(0, 0, 0, 3, "x".into()), (0, 1, 0, 4, "y".into())])
+            .is_err());
+        assert_eq!(buffer.text(), before);
     }
 }

@@ -11,6 +11,7 @@ editor loop; background workers never mutate UI state directly.
 - `explorer.rs`: workspace tree and navigation.
 - `command.rs`: shared stable command registry and palette.
 - `service.rs`: small cancellable worker and managed-process primitives.
+- `language_edits.rs`: validate complete LSP edit batches against buffer revisions.
 - `git.rs`, `lsp.rs`: typed background integrations.
 - `config.rs`: zero-config defaults and TOML loading.
 

@@ -32,6 +32,8 @@ pub struct Diagnostic {
     pub message: String,
 }
 
+pub type EditVersions = HashMap<PathBuf, (u64, u64)>;
+
 pub type TextEdit = (usize, usize, usize, usize, String);
 
 #[derive(Clone, Debug)]
@@ -49,11 +51,14 @@ pub enum LspEvent {
     },
     Completions(Vec<String>),
     Locations(Vec<(PathBuf, usize, usize)>),
-    WorkspaceEdits(Vec<(PathBuf, Vec<TextEdit>)>),
+    WorkspaceEdits(Vec<(PathBuf, Vec<TextEdit>)>, EditVersions),
     Information(String),
 }
 
 enum LspCommand {
+    Close {
+        path: PathBuf,
+    },
     Open {
         path: PathBuf,
         text: String,
@@ -91,6 +96,7 @@ enum LspCommand {
         line: usize,
         column: usize,
         new_name: String,
+        versions: EditVersions,
     },
     CodeActions {
         path: PathBuf,
@@ -99,6 +105,7 @@ enum LspCommand {
     },
     Formatting {
         path: PathBuf,
+        versions: EditVersions,
     },
     DocumentSymbols {
         path: PathBuf,
@@ -120,9 +127,9 @@ enum RequestKind {
     Definition,
     Completion,
     References,
-    Rename,
+    Rename(EditVersions),
     CodeActions,
-    Formatting(PathBuf),
+    Formatting(PathBuf, EditVersions),
     DocumentSymbols,
     WorkspaceSymbols,
     Signature,
@@ -159,6 +166,10 @@ impl LspService {
             text,
         });
     }
+    pub fn close(&self, path: PathBuf) {
+        let _ = self.worker.send(LspCommand::Close { path });
+    }
+
     pub fn save(&self, path: PathBuf) {
         let _ = self.worker.send(LspCommand::Save { path });
     }
@@ -180,12 +191,20 @@ impl LspService {
             .worker
             .send(LspCommand::References { path, line, column });
     }
-    pub fn rename(&self, path: PathBuf, line: usize, column: usize, new_name: String) {
+    pub fn rename(
+        &self,
+        path: PathBuf,
+        line: usize,
+        column: usize,
+        new_name: String,
+        versions: EditVersions,
+    ) {
         let _ = self.worker.send(LspCommand::Rename {
             path,
             line,
             column,
             new_name,
+            versions,
         });
     }
     pub fn code_actions(&self, path: PathBuf, line: usize, column: usize) {
@@ -193,8 +212,8 @@ impl LspService {
             .worker
             .send(LspCommand::CodeActions { path, line, column });
     }
-    pub fn formatting(&self, path: PathBuf) {
-        let _ = self.worker.send(LspCommand::Formatting { path });
+    pub fn formatting(&self, path: PathBuf, versions: EditVersions) {
+        let _ = self.worker.send(LspCommand::Formatting { path, versions });
     }
     pub fn document_symbols(&self, path: PathBuf) {
         let _ = self.worker.send(LspCommand::DocumentSymbols { path });
@@ -287,6 +306,7 @@ fn run_server(
     let mut writer = stdin;
     let mut next_id = 1_u64;
     let mut pending = HashMap::new();
+    let mut documents = HashMap::new();
     let root_uri = path_uri(&root);
     send_request(
         &mut writer,
@@ -300,6 +320,18 @@ fn run_server(
         while let Ok(value) = incoming_rx.try_recv() {
             handle_message(value, &mut writer, &mut pending, context)?;
         }
+        if pending
+            .values()
+            .any(|kind| matches!(kind, RequestKind::Initialize))
+        {
+            if child.child_mut().try_wait()?.is_some() {
+                return Err(io::Error::other(
+                    "language server exited during initialization",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            continue;
+        }
         match commands.recv_timeout(Duration::from_millis(20)) {
             Ok(command) => handle_command(
                 command,
@@ -307,6 +339,7 @@ fn run_server(
                 &mut writer,
                 &mut next_id,
                 &mut pending,
+                &mut documents,
             )?,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -326,23 +359,28 @@ fn handle_command(
     writer: &mut impl Write,
     next_id: &mut u64,
     pending: &mut HashMap<u64, RequestKind>,
+    documents: &mut HashMap<PathBuf, i64>,
 ) -> io::Result<()> {
     let position = |path: &Path, line, column| json!({"textDocument":{"uri":path_uri(path)},"position":{"line":line,"character":column}});
     match command {
-        LspCommand::Open { path, text } => send_notification(
-            writer,
-            "textDocument/didOpen",
-            json!({"textDocument":{"uri":path_uri(&path),"languageId":language_id,"version":1,"text":text}}),
-        ),
+        LspCommand::Close { path } => {
+            if documents.remove(&path).is_some() {
+                send_notification(
+                    writer,
+                    "textDocument/didClose",
+                    json!({"textDocument":{"uri":path_uri(&path)}}),
+                )?;
+            }
+            Ok(())
+        }
+        LspCommand::Open { path, text } => {
+            sync_document(writer, documents, path, 1, text, language_id)
+        }
         LspCommand::Change {
             path,
             version,
             text,
-        } => send_notification(
-            writer,
-            "textDocument/didChange",
-            json!({"textDocument":{"uri":path_uri(&path),"version":version},"contentChanges":[{"text":text}]}),
-        ),
+        } => sync_document(writer, documents, path, version, text, language_id),
         LspCommand::Save { path } => send_notification(
             writer,
             "textDocument/didSave",
@@ -385,11 +423,12 @@ fn handle_command(
             line,
             column,
             new_name,
+            versions,
         } => request(
             writer,
             next_id,
             pending,
-            RequestKind::Rename,
+            RequestKind::Rename(versions),
             "textDocument/rename",
             json!({"textDocument":{"uri":path_uri(&path)},"position":{"line":line,"character":column},"newName":new_name}),
         ),
@@ -401,11 +440,11 @@ fn handle_command(
             "textDocument/codeAction",
             json!({"textDocument":{"uri":path_uri(&path)},"range":{"start":{"line":line,"character":column},"end":{"line":line,"character":column}},"context":{"diagnostics":[]}}),
         ),
-        LspCommand::Formatting { path } => request(
+        LspCommand::Formatting { path, versions } => request(
             writer,
             next_id,
             pending,
-            RequestKind::Formatting(path.clone()),
+            RequestKind::Formatting(path.clone(), versions),
             "textDocument/formatting",
             json!({"textDocument":{"uri":path_uri(&path)},"options":{"tabSize":4,"insertSpaces":true}}),
         ),
@@ -436,6 +475,34 @@ fn handle_command(
     }
 }
 
+fn sync_document(
+    writer: &mut impl Write,
+    documents: &mut HashMap<PathBuf, i64>,
+    path: PathBuf,
+    version: i64,
+    text: String,
+    language_id: &str,
+) -> io::Result<()> {
+    if documents.get(&path) == Some(&version) {
+        return Ok(());
+    }
+    if documents.contains_key(&path) {
+        send_notification(
+            writer,
+            "textDocument/didChange",
+            json!({"textDocument":{"uri":path_uri(&path),"version":version},"contentChanges":[{"text":text}]}),
+        )?;
+    } else {
+        send_notification(
+            writer,
+            "textDocument/didOpen",
+            json!({"textDocument":{"uri":path_uri(&path),"languageId":language_id,"version":version,"text":text}}),
+        )?;
+    }
+    documents.insert(path, version);
+    Ok(())
+}
+
 fn request(
     writer: &mut impl Write,
     next_id: &mut u64,
@@ -456,6 +523,31 @@ fn handle_message(
     pending: &mut HashMap<u64, RequestKind>,
     context: &ServiceContext<LspEvent>,
 ) -> io::Result<()> {
+    if value.get("method").is_some() && value.get("id").is_some() {
+        let id = value["id"].clone();
+        let result = if value["method"] == "workspace/configuration" {
+            json!({"jsonrpc":"2.0","id":id,"result":vec![Value::Null; value["params"]["items"].as_array().map_or(0, Vec::len)]})
+        } else {
+            json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Unsupported client request"}})
+        };
+        return send_value(writer, &result);
+    }
+    if let Some(error) = value.get("error") {
+        if let Some(id) = value.get("id").and_then(Value::as_u64) {
+            let kind = pending.remove(&id);
+            if matches!(kind, Some(RequestKind::Initialize)) {
+                return Err(io::Error::other(format!(
+                    "language server initialization failed: {error}"
+                )));
+            }
+            if kind.is_some() {
+                context.emit(LspEvent::Information(format!(
+                    "Language request failed: {error}"
+                )));
+            }
+        }
+        return Ok(());
+    }
     if value.get("method").and_then(Value::as_str) == Some("textDocument/publishDiagnostics") {
         let params = &value["params"];
         let Some(path) = params["uri"].as_str().and_then(uri_path) else {
@@ -498,16 +590,17 @@ fn handle_message(
             Some(RequestKind::References) => {
                 context.emit(LspEvent::Locations(extract_locations(&value["result"])));
             }
-            Some(RequestKind::Rename) => {
-                context.emit(LspEvent::WorkspaceEdits(extract_workspace_edits(
-                    &value["result"],
-                )));
+            Some(RequestKind::Rename(versions)) => {
+                context.emit(LspEvent::WorkspaceEdits(
+                    extract_workspace_edits(&value["result"]),
+                    versions,
+                ));
             }
-            Some(RequestKind::Formatting(path)) => {
-                context.emit(LspEvent::WorkspaceEdits(vec![(
-                    path.clone(),
-                    extract_text_edits(&value["result"]),
-                )]));
+            Some(RequestKind::Formatting(path, versions)) => {
+                context.emit(LspEvent::WorkspaceEdits(
+                    vec![(path.clone(), extract_text_edits(&value["result"]))],
+                    versions,
+                ));
             }
             Some(RequestKind::CodeActions) => {
                 context.emit(LspEvent::Information(format_items(
@@ -583,12 +676,42 @@ fn read_message(reader: &mut impl BufRead) -> io::Result<Option<Value>> {
 }
 
 fn path_uri(path: &Path) -> String {
-    format!("file://{}", path.to_string_lossy().replace(' ', "%20"))
+    use std::os::unix::ffi::OsStrExt;
+    let path = crate::file_io::absolute_path(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut uri = String::from("file://");
+    for &byte in path.as_os_str().as_bytes() {
+        if byte.is_ascii_alphanumeric() || b"/-._~".contains(&byte) {
+            uri.push(byte as char);
+        } else {
+            use std::fmt::Write;
+            let _ = write!(uri, "%{byte:02X}");
+        }
+    }
+    uri
 }
 fn uri_path(uri: &str) -> Option<PathBuf> {
-    uri.strip_prefix("file://")
-        .map(|path| PathBuf::from(path.replace("%20", " ")))
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+    let path = uri.strip_prefix("file://")?;
+    let path = path
+        .strip_prefix("localhost/")
+        .map_or_else(|| path.to_owned(), |path| format!("/{path}"));
+    if !path.starts_with('/') {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    let mut source = path.bytes();
+    while let Some(byte) = source.next() {
+        if byte == b'%' {
+            let high = (source.next()? as char).to_digit(16)?;
+            let low = (source.next()? as char).to_digit(16)?;
+            bytes.push((high * 16 + low) as u8);
+        } else {
+            bytes.push(byte);
+        }
+    }
+    Some(PathBuf::from(OsString::from_vec(bytes)))
 }
+
 fn extract_text(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
@@ -733,5 +856,94 @@ mod tests {
         let output = format_items("Symbols", &json!([{"name":"main"},{"title":"Fix import"}]));
         assert!(output.contains("main"));
         assert!(output.contains("Fix import"));
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    #[test]
+    fn documents_open_once_then_change_with_versions() {
+        let mut writer = Vec::new();
+        let mut documents = HashMap::new();
+        let a = PathBuf::from("/tmp/a.rs");
+        let b = PathBuf::from("/tmp/b.rs");
+        sync_document(
+            &mut writer,
+            &mut documents,
+            a.clone(),
+            1,
+            "a".into(),
+            "rust",
+        )
+        .unwrap();
+        sync_document(&mut writer, &mut documents, b, 3, "b".into(), "rust").unwrap();
+        sync_document(
+            &mut writer,
+            &mut documents,
+            a.clone(),
+            1,
+            "a".into(),
+            "rust",
+        )
+        .unwrap();
+        sync_document(&mut writer, &mut documents, a, 2, "edited".into(), "rust").unwrap();
+        let mut reader = io::Cursor::new(writer);
+        assert_eq!(
+            read_message(&mut reader).unwrap().unwrap()["method"],
+            "textDocument/didOpen"
+        );
+        let opened = read_message(&mut reader).unwrap().unwrap();
+        assert_eq!(opened["method"], "textDocument/didOpen");
+        assert_eq!(opened["params"]["textDocument"]["version"], 3);
+        assert_eq!(
+            read_message(&mut reader).unwrap().unwrap()["method"],
+            "textDocument/didChange"
+        );
+        assert!(read_message(&mut reader).unwrap().is_none());
+    }
+    #[test]
+    fn file_uris_round_trip_reserved_and_unicode_names() {
+        let path = PathBuf::from("/tmp/a #100% é.rs");
+        let uri = path_uri(&path);
+        assert!(uri.contains("%23"));
+        assert!(uri.contains("%25"));
+        assert_eq!(uri_path(&uri), Some(path));
+        assert!(uri_path("file:///tmp/%XY").is_none());
+    }
+    #[test]
+    fn formatting_response_keeps_its_original_revision_context() {
+        let (tx, rx) = mpsc::channel();
+        let context = ServiceContext {
+            events: tx,
+            cancellation: Default::default(),
+        };
+        let path = PathBuf::from("/tmp/a.rs");
+        let expected = EditVersions::from([(path.clone(), (9, 3))]);
+        let mut pending =
+            HashMap::from([(1, RequestKind::Formatting(path.clone(), expected.clone()))]);
+        let mut writer = Vec::new();
+        // A server request may reuse a numeric ID without consuming our request.
+        handle_message(
+            json!({"id":1,"method":"workspace/configuration","params":{"items":[{}]}}),
+            &mut writer,
+            &mut pending,
+            &context,
+        )
+        .unwrap();
+        assert!(pending.contains_key(&1));
+        handle_message(
+            json!({"id":1,"result":[]}),
+            &mut writer,
+            &mut pending,
+            &context,
+        )
+        .unwrap();
+        match rx.recv().unwrap() {
+            ServiceEvent::Item(LspEvent::WorkspaceEdits(_, versions)) => {
+                assert_eq!(versions, expected)
+            }
+            _ => panic!("expected edit event"),
+        }
     }
 }
