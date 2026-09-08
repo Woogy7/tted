@@ -15,3 +15,5 @@ mod syntax;
 pub mod theme;
 
 pub(crate) mod markdown_edit;
+
+pub mod cli;

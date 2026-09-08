@@ -106,6 +106,12 @@ install_release() {
         rm -rf "$temporary"
         return 1
     fi
+    if [ -f "$temporary/te" ]; then
+        install -m 0755 "$temporary/te" "$install_dir/te" || { rm -rf "$temporary"; return 1; }
+    else
+        # Older releases have only tted; both command names use the same editor.
+        ln -sf tted "$install_dir/te" || { rm -rf "$temporary"; return 1; }
+    fi
     rm -rf "$temporary"
 }
 
@@ -161,4 +167,4 @@ case ":${PATH}:" in
 esac
 
 echo "Installed TTED to $install_dir/tted"
-echo "Open a new terminal, then run: tted ."
+echo "Open a new terminal, then run: te . (or tted .)"

@@ -37,7 +37,7 @@ jobs:
           strip: true
       - name: Package binary and checksum
         run: |
-          tar -czf tted-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release tted
+          tar -czf tted-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release tted te
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum tted-${{ matrix.target }}.tar.gz > tted-${{ matrix.target }}.tar.gz.sha256
           else

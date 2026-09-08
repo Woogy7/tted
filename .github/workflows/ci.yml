@@ -15,6 +15,7 @@ jobs:
       - run: cargo test
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo build --release
+      - run: ./target/release/tted --help && ./target/release/te --help
       - name: Validate installer
         run: |
           sh -n install.sh
