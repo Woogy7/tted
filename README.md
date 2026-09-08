@@ -235,6 +235,11 @@ Markdown editing includes:
 - Three backticks create a fence pair; type an optional language and press Enter
   to open the block. Typing an existing closing backtick moves past it.
 
+In live preview, click **[Copy]** beside a code block to copy its code without
+the fences or language label. Code whitespace is preserved, and the copied text
+is also available through TTED’s Ctrl+V clipboard. The control appears beside the
+block’s first line when there is room without covering text.
+
 List automation is disabled inside fenced code. Both Markdown views share a
 cached parser for consistent styling and responsive navigation.
 

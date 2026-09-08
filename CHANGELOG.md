@@ -4,6 +4,9 @@ All notable changes are documented here.
 
 ## Unreleased
 
+- Add clickable code-block Copy controls in Markdown live preview, preserving
+  code whitespace while excluding fence markers and language labels.
+
 - Preserve manually typed empty list/quote markers on Enter; only an untouched
   auto-inserted empty item exits on the next Enter. Keep fenced-code delimiters
   visible while editing inside the block in live preview.

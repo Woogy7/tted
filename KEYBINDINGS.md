@@ -59,3 +59,6 @@ three backticks for a fence pair, optionally add a language, then press Enter.
 Typing a closing backtick already under the cursor moves past it.
 
 Live preview keeps both fences visible while the cursor is inside a code block.
+
+Click **[Copy]** beside a code block in Markdown live preview to copy its contents
+to the terminal clipboard and TTED’s Ctrl+V clipboard without changing the file.

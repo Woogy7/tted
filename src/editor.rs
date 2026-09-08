@@ -497,6 +497,19 @@ impl Editor {
                         + usize::from(mouse.column.saturating_sub(self.body.x + self.gutter_width));
                     let select = matches!(mouse.kind, MouseEventKind::Drag(_))
                         || mouse.modifiers.contains(KeyModifiers::SHIFT);
+                    if self.markdown_reading[self.active] && !select {
+                        if let Some((_, index)) = self
+                            .markdown_copy_buttons()
+                            .into_iter()
+                            .find(|(area, _)| area.contains((mouse.column, mouse.row).into()))
+                        {
+                            let text = self.markdown_document().code_blocks[index].text.clone();
+                            self.copy_to_terminal_clipboard(&text)?;
+                            self.clipboard = Some(text);
+                            self.message = "Copied code block".into();
+                            return Ok(false);
+                        }
+                    }
                     if self.markdown_reading[self.active]
                         && !select
                         && self.toggle_markdown_task(line, col)
@@ -2441,6 +2454,47 @@ impl Editor {
         false
     }
 
+    fn markdown_copy_buttons(&self) -> Vec<(Rect, usize)> {
+        if !self.markdown_reading[self.active] || self.body.width < 8 {
+            return Vec::new();
+        }
+        let document = self.markdown_document();
+        document
+            .code_blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, block)| {
+                if block.row < self.top_line
+                    || block.row >= self.top_line + usize::from(self.body.height)
+                {
+                    return None;
+                }
+                let width = if self.markdown_line_is_raw(block.row) {
+                    UnicodeWidthStr::width(
+                        self.current()
+                            .line(block.row)
+                            .trim_end_matches(['\r', '\n']),
+                    )
+                } else {
+                    document.lines[block.row].width()
+                };
+                // Leave a gap and never place a control over source text.
+                if width.saturating_sub(self.left_col) + 8 > usize::from(self.body.width) {
+                    return None;
+                }
+                Some((
+                    Rect::new(
+                        self.body.right() - 6,
+                        self.body.y + (block.row - self.top_line) as u16,
+                        6,
+                        1,
+                    ),
+                    index,
+                ))
+            })
+            .collect()
+    }
+
     fn markdown_visible_lines(&self) -> Vec<Line<'static>> {
         let document = self.markdown_document();
         let end = (self.top_line + usize::from(self.body.height)).min(self.current().len_lines());
@@ -2580,6 +2634,17 @@ impl Editor {
                     .style(Style::default().bg(theme::BASE).fg(theme::TEXT)),
                 self.body,
             );
+            for (area, _) in self.markdown_copy_buttons() {
+                frame.render_widget(
+                    Paragraph::new("[Copy]").style(
+                        Style::default()
+                            .fg(theme::BLUE)
+                            .bg(theme::SURFACE0)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    area,
+                );
+            }
             let (line, _) = self.current().cursor_line_col();
             if !self.help_visible
                 && line >= self.top_line
@@ -4370,5 +4435,57 @@ mod markdown_enter_regression_tests {
         assert_eq!(lines[2].to_string(), "```");
         editor.current_mut().save().unwrap();
         assert_eq!(fs::read_to_string(path).unwrap(), "```\n\n```");
+    }
+}
+
+#[cfg(test)]
+mod code_copy_input_tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+    #[test]
+    fn copy_click_preserves_document_cursor_selection_and_undo_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.md");
+        let source = "intro\n```rust\n  code 🌍\n```\n";
+        fs::write(&path, source).unwrap();
+        let mut editor = Editor::new(vec![path]);
+        editor.markdown_reading[0] = true;
+        editor.current_mut().set_cursor_line_col(0, 0, false);
+        editor.current_mut().set_cursor_line_col(0, 3, true);
+        let before = (
+            editor.current().cursor(),
+            editor.current().selection(),
+            editor.current().revision(),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal.draw(|frame| editor.render(frame)).unwrap();
+        let buttons = editor.markdown_copy_buttons();
+        assert_eq!(buttons.len(), 1);
+        let area = buttons[0].0;
+        editor
+            .handle_event(Event::Mouse(event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: area.x,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            }))
+            .unwrap();
+        assert_eq!(editor.clipboard.as_deref(), Some("  code 🌍\n"));
+        assert_eq!(editor.current().text(), source);
+        assert_eq!(
+            (
+                editor.current().cursor(),
+                editor.current().selection(),
+                editor.current().revision()
+            ),
+            before
+        );
+        assert!(!editor.current().is_dirty());
+        assert_eq!(editor.message, "Copied code block");
+        editor.top_line = 2;
+        assert!(editor.markdown_copy_buttons().is_empty());
+        editor.top_line = 0;
+        editor.body.width = 5;
+        assert!(editor.markdown_copy_buttons().is_empty());
     }
 }

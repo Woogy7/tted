@@ -21,9 +21,15 @@ struct SourceRun {
     exact: bool,
 }
 
+pub(crate) struct CodeBlock {
+    pub row: usize,
+    pub text: String,
+}
+
 pub struct RenderedMarkdown {
     pub lines: Vec<Line<'static>>,
     pub tasks: Vec<TaskMarker>,
+    pub(crate) code_blocks: Vec<CodeBlock>,
     runs: Vec<Vec<SourceRun>>,
     pub(crate) code_rows: Vec<bool>,
     pub(crate) fenced_rows: Vec<bool>,
@@ -131,6 +137,7 @@ pub fn render_document(source: &str) -> RenderedMarkdown {
     let mut document = RenderedMarkdown {
         lines: vec![Line::default(); byte_starts.len()],
         tasks: Vec::new(),
+        code_blocks: Vec::new(),
         runs: vec![Vec::new(); byte_starts.len()],
         code_rows: vec![false; byte_starts.len()],
         fenced_rows: vec![false; byte_starts.len()],
@@ -151,6 +158,7 @@ pub fn render_document(source: &str) -> RenderedMarkdown {
     };
     let mut style = Style::default();
     let mut styles = Vec::new();
+    let mut code_block = None;
     let mut lists = Vec::<Option<u64>>::new();
     let append = |document: &mut RenderedMarkdown,
                   row: usize,
@@ -183,6 +191,11 @@ pub fn render_document(source: &str) -> RenderedMarkdown {
                         style = style.fg(theme::BLUE).add_modifier(Modifier::UNDERLINED)
                     }
                     Tag::CodeBlock(kind) => {
+                        code_block = Some(document.code_blocks.len());
+                        document.code_blocks.push(CodeBlock {
+                            row,
+                            text: String::new(),
+                        });
                         let last = row_at(range.end.saturating_sub(1));
                         document.code_rows[row..=last].fill(true);
                         if matches!(kind, pulldown_cmark::CodeBlockKind::Fenced(_)) {
@@ -230,6 +243,9 @@ pub fn render_document(source: &str) -> RenderedMarkdown {
                 }
             }
             Event::End(tag) => {
+                if matches!(tag, TagEnd::CodeBlock) {
+                    code_block = None;
+                }
                 if matches!(tag, TagEnd::List(_)) {
                     lists.pop();
                 }
@@ -248,6 +264,9 @@ pub fn render_document(source: &str) -> RenderedMarkdown {
                 style = styles.pop().unwrap_or_default();
             }
             Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
+                if let Some(index) = code_block {
+                    document.code_blocks[index].text.push_str(&text);
+                }
                 let exact = text.as_ref() == &source[range.clone()];
                 let mut byte = range.start;
                 for (line_offset, part) in text.split_inclusive('\n').enumerate() {
@@ -470,5 +489,25 @@ mod source_style_tests {
             }
             start += length;
         }
+    }
+}
+
+#[cfg(test)]
+mod code_copy_tests {
+    use super::*;
+    #[test]
+    fn copy_content_excludes_fences_and_preserves_code_whitespace() {
+        let document = render_document(
+            "```rust\n  let 🌍 = 1;\n\n```\n\n> ~~~sh\n> echo hi\n> ~~~\n\n    indented\n\n```\n",
+        );
+        let contents = document
+            .code_blocks
+            .iter()
+            .map(|block| block.text.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contents,
+            vec!["  let 🌍 = 1;\n\n", "echo hi\n", "indented\n", ""]
+        );
     }
 }
