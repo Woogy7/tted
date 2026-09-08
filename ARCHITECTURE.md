@@ -4,6 +4,7 @@ TTED is one Rust crate with a single-threaded editor state model. Terminal
 events, commands, and completed service events converge on the
 editor loop; background workers never mutate UI state directly.
 
+- `file_io.rs`: atomic file replacement, metadata checks, and save destinations.
 - `buffer.rs`: Ropey text, cursors, selections, revisions, undo, persistence.
 - `editor.rs`: files/tabs/views, commands, input routing, layout, rendering.
 - `explorer.rs`: workspace tree and navigation.

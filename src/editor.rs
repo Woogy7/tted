@@ -29,6 +29,7 @@ use crate::buffer::{Buffer, ExternalChange};
 use crate::command::{Command, CommandPalette};
 use crate::config::Config;
 use crate::explorer::{Explorer, ExplorerAction};
+use crate::file_io::{file_stamp, FileStamp};
 use crate::git::GitService;
 use crate::lsp::{Diagnostic, LspEvent, LspService};
 use crate::quick_open::QuickOpen;
@@ -107,6 +108,7 @@ pub struct Editor {
     keybindings_area: Option<Rect>,
     close_armed: Option<usize>,
     path_prompt: Option<String>,
+    overwrite_prompt: Option<(PathBuf, Option<FileStamp>)>,
     help_visible: bool,
     gutter_width: u16,
     sidebar_visible: bool,
@@ -187,6 +189,7 @@ impl Editor {
             keybindings_area: None,
             close_armed: None,
             path_prompt: None,
+            overwrite_prompt: None,
             help_visible: false,
             gutter_width: 0,
             sidebar_visible: workspace_argument.is_some(),
@@ -289,6 +292,7 @@ impl Editor {
             Event::Paste(text) => {
                 if self.help_visible
                     || self.external_prompt.is_some()
+                    || self.overwrite_prompt.is_some()
                     || self.delete_confirm.is_some()
                     || self.close_armed.is_some()
                     || self.git_discard_confirm.is_some()
@@ -350,6 +354,7 @@ impl Editor {
             Event::Mouse(_)
                 if self.help_visible
                     || self.external_prompt.is_some()
+                    || self.overwrite_prompt.is_some()
                     || self.git_discard_confirm.is_some()
                     || self.git_commit_prompt.is_some()
                     || self.lsp_prompt.is_some()
@@ -510,6 +515,42 @@ impl Editor {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        if self.overwrite_prompt.is_some() {
+            return self.overwrite_prompt_key(key);
+        }
+        if self.external_prompt.is_some() {
+            return self.external_prompt_key(key);
+        }
+        if self.git_discard_confirm.is_some() {
+            return self.git_discard_key(key);
+        }
+        if self.git_commit_prompt.is_some() {
+            return self.git_commit_key(key);
+        }
+        if self.close_armed.is_some() {
+            return self.close_confirm_key(key);
+        }
+        if self.delete_confirm.is_some() {
+            return self.delete_confirm_key(key);
+        }
+        if self.explorer_context_visible {
+            return self.explorer_context_key(key);
+        }
+        if self.explorer_prompt.is_some() {
+            return self.explorer_prompt_key(key);
+        }
+        if self.path_prompt.is_some() {
+            return self.path_prompt_key(key);
+        }
+        if self.search.is_some() {
+            return self.search_key(key);
+        }
+        if self.quick_open.is_some() {
+            return self.quick_open_key(key);
+        }
+        if self.command_palette.is_some() {
+            return self.command_palette_key(key);
+        }
         if self.hover_popup.is_some() {
             self.hover_popup = None;
             return Ok(false);
@@ -576,39 +617,6 @@ impl Editor {
         if key.code == KeyCode::F(8) {
             self.problems_visible = true;
             return self.jump_to_problem(1);
-        }
-        if self.external_prompt.is_some() {
-            return self.external_prompt_key(key);
-        }
-        if self.git_discard_confirm.is_some() {
-            return self.git_discard_key(key);
-        }
-        if self.git_commit_prompt.is_some() {
-            return self.git_commit_key(key);
-        }
-        if self.close_armed.is_some() {
-            return self.close_confirm_key(key);
-        }
-        if self.delete_confirm.is_some() {
-            return self.delete_confirm_key(key);
-        }
-        if self.explorer_context_visible {
-            return self.explorer_context_key(key);
-        }
-        if self.explorer_prompt.is_some() {
-            return self.explorer_prompt_key(key);
-        }
-        if self.path_prompt.is_some() {
-            return self.path_prompt_key(key);
-        }
-        if self.search.is_some() {
-            return self.search_key(key);
-        }
-        if self.quick_open.is_some() {
-            return self.quick_open_key(key);
-        }
-        if self.command_palette.is_some() {
-            return self.command_palette_key(key);
         }
         if ctrl && shift && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P')) {
             self.command_palette = Some(CommandPalette::new());
@@ -1180,7 +1188,7 @@ impl Editor {
                                 lsp.save(path.to_path_buf());
                             }
                         }
-                        Err(error) => self.message = format!("Save failed: {error}"),
+                        Err(error) => self.save_error(error),
                     }
                 }
             }
@@ -1621,7 +1629,23 @@ impl Editor {
                             self.git.request_refresh();
                             self.message = "Saved".into();
                         }
-                        Err(error) => self.message = format!("Save failed: {error}"),
+                        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                            let destination = PathBuf::from(path.trim());
+                            if self.buffers.iter().enumerate().any(|(index, buffer)| {
+                                index != self.active
+                                    && buffer
+                                        .path()
+                                        .is_some_and(|open| same_path(open, &destination))
+                            }) {
+                                self.message = "Destination is open in another tab; save or close that tab first".into();
+                            } else {
+                                match file_stamp(&destination) {
+                                    Ok(stamp) => self.overwrite_prompt = Some((destination, stamp)),
+                                    Err(error) => self.save_error(error),
+                                }
+                            }
+                        }
+                        Err(error) => self.save_error(error),
                     }
                 }
             }
@@ -1633,6 +1657,43 @@ impl Editor {
                     .as_mut()
                     .expect("path prompt")
                     .push(character);
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    fn save_error(&mut self, error: io::Error) {
+        self.message = format!("Save failed: {error}");
+        if error.kind() == io::ErrorKind::WouldBlock {
+            if let Ok(change) = self.current().check_external_change() {
+                if change != ExternalChange::None {
+                    self.external_prompt = Some(ExternalPrompt {
+                        buffer: self.active,
+                        change,
+                    });
+                }
+            }
+        }
+    }
+
+    fn overwrite_prompt_key(&mut self, key: KeyEvent) -> Result<bool> {
+        match key.code {
+            KeyCode::Char('y' | 'Y') => {
+                let (path, stamp) = self.overwrite_prompt.take().expect("overwrite prompt");
+                match self.current_mut().save_as_confirmed(path, stamp) {
+                    Ok(()) => {
+                        self.explorer.refresh();
+                        self.git.request_refresh();
+                        self.activate_lsp_for_current();
+                        self.message = "Saved".into();
+                    }
+                    Err(error) => self.save_error(error),
+                }
+            }
+            KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                self.overwrite_prompt = None;
+                self.message = "Save As cancelled".into();
             }
             _ => {}
         }
@@ -1668,7 +1729,10 @@ impl Editor {
     }
 
     fn check_external_files(&mut self) -> bool {
-        if self.external_prompt.is_some() {
+        if self.external_prompt.is_some()
+            || self.overwrite_prompt.is_some()
+            || self.path_prompt.is_some()
+        {
             return false;
         }
         for index in 0..self.buffers.len() {
@@ -3077,6 +3141,12 @@ impl Editor {
     }
 
     fn modal_prompt_text(&self) -> Option<String> {
+        if let Some((path, _)) = &self.overwrite_prompt {
+            return Some(format!(
+                "Overwrite {}? Y overwrites · N/Esc cancels",
+                path.display()
+            ));
+        }
         if let Some(path) = &self.delete_confirm {
             return Some(format!(
                 "Delete {} permanently? Y confirm  N/Esc cancel",
@@ -3774,5 +3844,38 @@ mod input_tests {
         assert_eq!(editor.active, 1);
         editor.execute_command(Command::CloseSplit).unwrap();
         assert!(editor.split.is_none());
+    }
+}
+
+#[cfg(test)]
+mod safety_tests {
+    use super::*;
+    #[test]
+    fn save_as_prompts_and_custom_bindings_cannot_bypass_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("exists");
+        fs::write(&path, "original").unwrap();
+        let mut editor = Editor::new(vec![directory.path().into()]);
+        editor.current_mut().insert("replacement");
+        editor.path_prompt = Some(path.display().to_string());
+        editor
+            .key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        assert!(editor.overwrite_prompt.is_some());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "original");
+        editor
+            .config
+            .keybindings
+            .insert("ctrl+s".into(), "file.save".into());
+        editor
+            .key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert!(editor.overwrite_prompt.is_some());
+        assert!(editor.path_prompt.is_none());
+        editor
+            .key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), "replacement");
+        assert!(!editor.current().is_dirty());
     }
 }

@@ -2,11 +2,12 @@ use std::{
     fs, io,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, Instant},
 };
 
 static NEXT_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
 
+use crate::file_io::{absolute_path, atomic_write, file_stamp, FileStamp};
 use ropey::Rope;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -31,12 +32,6 @@ pub enum ExternalChange {
     None,
     Modified,
     Deleted,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FileStamp {
-    modified: Option<SystemTime>,
-    len: u64,
 }
 
 pub struct Buffer {
@@ -72,8 +67,8 @@ impl Buffer {
     }
 
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
-        let path = path.as_ref();
-        let bytes = fs::read(path)?;
+        let path = absolute_path(path.as_ref())?;
+        let bytes = fs::read(&path)?;
         let source = String::from_utf8(bytes).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -90,7 +85,9 @@ impl Buffer {
     }
 
     fn from_text(text: String, path: Option<PathBuf>, crlf: bool) -> Self {
-        let disk_stamp = path.as_deref().and_then(file_stamp);
+        let disk_stamp = path
+            .as_deref()
+            .and_then(|path| file_stamp(path).ok().flatten());
         Self {
             id: NEXT_BUFFER_ID.fetch_add(1, Ordering::Relaxed),
             text: Rope::from_str(&text),
@@ -170,6 +167,15 @@ impl Buffer {
         }
         let mut edits = edits.to_vec();
         edits.sort_unstable_by_key(|edit| std::cmp::Reverse(edit.0));
+        if edits
+            .windows(2)
+            .any(|pair| pair[1].1 > pair[0].0 || pair[1].0 == pair[0].0)
+        {
+            return Err("overlapping edit ranges");
+        }
+        if edits.is_empty() {
+            return Ok(self.revision);
+        }
         self.checkpoint();
         for (start, end, text) in edits {
             self.text.remove(start..end);
@@ -304,6 +310,9 @@ impl Buffer {
         replacement: &str,
         case_sensitive: bool,
     ) -> usize {
+        if self.read_only {
+            return 0;
+        }
         let matches = self.search_ranges(query, case_sensitive);
         if matches.is_empty() {
             return 0;
@@ -383,17 +392,22 @@ impl Buffer {
             return Vec::new();
         }
         let folded_query = query.to_lowercase();
-        (0..=chars.len().saturating_sub(query_chars))
-            .filter_map(|start| {
-                let end = start + query_chars;
-                chars[start..end]
-                    .iter()
-                    .collect::<String>()
-                    .to_lowercase()
-                    .eq(&folded_query)
-                    .then_some((start, end))
-            })
-            .collect()
+        let mut matches = Vec::new();
+        let mut start = 0;
+        while start + query_chars <= chars.len() {
+            let end = start + query_chars;
+            if chars[start..end]
+                .iter()
+                .flat_map(|c| c.to_lowercase())
+                .eq(folded_query.chars())
+            {
+                matches.push((start, end));
+                start = end;
+            } else {
+                start += 1;
+            }
+        }
+        matches
     }
     pub fn selection(&self) -> Option<(usize, usize)> {
         self.anchor.filter(|a| *a != self.cursor).map(|a| {
@@ -729,30 +743,56 @@ impl Buffer {
                 )
             })?
             .clone();
-        self.write_to(&path)
+        self.write_to(&path, self.disk_stamp)
     }
 
     pub fn save_as(&mut self, path: impl AsRef<Path>) -> io::Result<()> {
-        let path = path.as_ref().to_path_buf();
-        self.write_to(&path)?;
+        let path = absolute_path(path.as_ref())?;
+        if self.path.as_ref().is_some_and(|current| {
+            current == &path
+                || current
+                    .canonicalize()
+                    .ok()
+                    .zip(path.canonicalize().ok())
+                    .is_some_and(|(a, b)| a == b)
+        }) {
+            return self.save();
+        }
+        if fs::symlink_metadata(&path).is_ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Save As destination exists",
+            ));
+        }
+        self.save_as_confirmed(path, None)
+    }
+
+    pub(crate) fn save_as_confirmed(
+        &mut self,
+        path: PathBuf,
+        expected: Option<FileStamp>,
+    ) -> io::Result<()> {
+        let path = absolute_path(&path)?;
+        self.write_to(&path, expected)?;
         self.path = Some(path);
         Ok(())
     }
 
-    fn write_to(&mut self, path: &Path) -> io::Result<()> {
+    fn write_to(&mut self, path: &Path, expected: Option<FileStamp>) -> io::Result<()> {
+        if self.read_only {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "buffer is read-only",
+            ));
+        }
         let mut text = self.text.to_string();
         if self.crlf {
             text = text.replace('\n', "\r\n");
         }
-        let temp = path.with_extension(format!(
-            "{}.tted-tmp",
-            path.extension().and_then(|x| x.to_str()).unwrap_or("")
-        ));
-        fs::write(&temp, text.as_bytes())?;
-        fs::rename(temp, path)?;
+        atomic_write(path, text.as_bytes(), expected)?;
         self.saved_content_id = self.content_id;
         self.edit_group = None;
-        self.disk_stamp = file_stamp(path);
+        self.disk_stamp = file_stamp(path)?;
         Ok(())
     }
 
@@ -760,23 +800,14 @@ impl Buffer {
         let Some(path) = self.path() else {
             return Ok(ExternalChange::None);
         };
-        match fs::metadata(path) {
-            Ok(metadata) => {
-                let current = stamp_from_metadata(&metadata);
-                Ok(match self.disk_stamp {
-                    Some(known) if known == current => ExternalChange::None,
-                    Some(_) | None => ExternalChange::Modified,
-                })
-            }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                Ok(if self.disk_stamp.is_some() {
-                    ExternalChange::Deleted
-                } else {
-                    ExternalChange::None
-                })
-            }
-            Err(error) => Err(error),
-        }
+        let current = file_stamp(path)?;
+        Ok(if current == self.disk_stamp {
+            ExternalChange::None
+        } else if current.is_none() {
+            ExternalChange::Deleted
+        } else {
+            ExternalChange::Modified
+        })
     }
 
     pub fn reload_from_disk(&mut self) -> io::Result<()> {
@@ -810,30 +841,20 @@ impl Buffer {
         self.content_id = self.next_content_id;
         self.next_content_id = self.next_content_id.wrapping_add(1);
         self.saved_content_id = self.content_id;
-        self.disk_stamp = file_stamp(path);
+        self.disk_stamp = file_stamp(path)?;
         Ok(())
     }
 
     pub fn keep_after_external_change(&mut self) {
-        self.disk_stamp = self.path.as_deref().and_then(file_stamp);
+        self.disk_stamp = self
+            .path
+            .as_deref()
+            .and_then(|path| file_stamp(path).ok().flatten());
         if !self.is_dirty() {
             self.content_id = self.next_content_id;
             self.next_content_id = self.next_content_id.wrapping_add(1);
         }
         self.edit_group = None;
-    }
-}
-
-fn file_stamp(path: &Path) -> Option<FileStamp> {
-    fs::metadata(path)
-        .ok()
-        .map(|metadata| stamp_from_metadata(&metadata))
-}
-
-fn stamp_from_metadata(metadata: &fs::Metadata) -> FileStamp {
-    FileStamp {
-        modified: metadata.modified().ok(),
-        len: metadata.len(),
     }
 }
 
@@ -1128,5 +1149,107 @@ mod tests {
             Err("stale buffer revision")
         );
         assert_eq!(buffer.text(), "world");
+    }
+}
+
+#[cfg(test)]
+mod safety_tests {
+    use super::*;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    #[test]
+    fn replace_all_does_not_overlap_matches() {
+        let mut buffer = Buffer::empty();
+        buffer.insert("aaa AAA");
+        assert_eq!(buffer.replace_all_search("aa", "", false), 2);
+        assert_eq!(buffer.text(), "a A");
+        buffer.undo();
+        assert_eq!(buffer.text(), "aaa AAA");
+    }
+    #[test]
+    fn overlapping_edits_are_rejected_before_mutation() {
+        let mut buffer = Buffer::empty();
+        buffer.insert("abcdef");
+        let revision = buffer.revision();
+        assert!(buffer
+            .replace_ranges(revision, &[(0, 5, "".into()), (3, 6, "".into())])
+            .is_err());
+        assert_eq!(buffer.text(), "abcdef");
+        assert_eq!(buffer.revision(), revision);
+    }
+    #[test]
+    fn save_preserves_permissions_and_symlink_target() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("script.sh");
+        let link = directory.path().join("link.sh");
+        fs::write(&target, "before").unwrap();
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o700)).unwrap();
+        symlink(&target, &link).unwrap();
+        let mut buffer = Buffer::open(&link).unwrap();
+        buffer.select_all();
+        buffer.insert("after");
+        buffer.save().unwrap();
+        assert_eq!(fs::read_to_string(target).unwrap(), "after");
+        assert!(fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::metadata(link).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+    #[test]
+    fn save_never_uses_predictable_temporary_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("file.txt");
+        let victim = directory.path().join("victim");
+        fs::write(&path, "before").unwrap();
+        fs::write(&victim, "private").unwrap();
+        symlink(&victim, path.with_extension("txt.tted-tmp")).unwrap();
+        let mut buffer = Buffer::open(path).unwrap();
+        buffer.insert("after");
+        buffer.save().unwrap();
+        assert_eq!(fs::read_to_string(victim).unwrap(), "private");
+    }
+    #[test]
+    fn save_checks_external_change_without_polling() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("file.txt");
+        fs::write(&path, "initial").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        buffer.insert("human");
+        fs::write(&path, "external").unwrap();
+        assert_eq!(buffer.save().unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "external");
+        assert!(buffer.is_dirty());
+        buffer.keep_after_external_change();
+        buffer.save().unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), "humaninitial");
+    }
+    #[test]
+    fn save_as_requires_explicit_unchanged_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("exists");
+        fs::write(&path, "original").unwrap();
+        let mut buffer = Buffer::empty();
+        buffer.insert("new");
+        assert_eq!(
+            buffer.save_as(&path).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        let stamp = file_stamp(&path).unwrap();
+        fs::write(&path, "changed while confirming").unwrap();
+        assert_eq!(
+            buffer
+                .save_as_confirmed(path.clone(), stamp)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            fs::read_to_string(path).unwrap(),
+            "changed while confirming"
+        );
+        assert!(buffer.path().is_none());
     }
 }

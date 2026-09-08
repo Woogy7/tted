@@ -53,6 +53,7 @@ fn main() -> Result<()> {
     }
     let paths = arguments.into_iter().map(PathBuf::from).collect();
     enable_raw_mode().context("enable terminal raw mode")?;
+    let guard = TerminalGuard;
     execute!(
         stdout(),
         EnterAlternateScreen,
@@ -62,7 +63,6 @@ fn main() -> Result<()> {
         crossterm::cursor::Show
     )
     .context("initialize terminal")?;
-    let guard = TerminalGuard;
     let mut terminal =
         ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;

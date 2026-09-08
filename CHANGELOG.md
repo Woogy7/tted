@@ -4,6 +4,12 @@ All notable changes are documented here.
 
 ## Unreleased
 
+- Preserve file permissions and symlinks when saving; use unique, synced temporary
+  files and recheck disk changes before replacement. Save As confirms overwrites.
+- Reject overlapping range edits and fix overlapping case-insensitive Replace All.
+- Keep safety dialogs ahead of custom shortcuts and restore the terminal after
+  partial initialization failures. Declare Rust 1.88 as the minimum compiler.
+
 - Focus TTED on terminal editing; remove integrated chat, agent API, approvals,
   and agent-specific change tracking. External tools continue to edit files directly.
 - Remove agent commands and bindings; legacy agent configuration is ignored.

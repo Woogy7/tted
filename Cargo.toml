@@ -2,6 +2,7 @@
 name = "tted"
 version = "0.1.1"
 edition = "2021"
+rust-version = "1.88"
 license = "Apache-2.0"
 description = "A modern terminal text editor"
 repository = "https://github.com/Woogy7/tted"
@@ -20,6 +21,7 @@ ropey = "1.6"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 syntect = { version = "5.2", default-features = false, features = ["default-syntaxes", "default-themes", "parsing", "regex-fancy"] }
+tempfile = "3.20"
 toml = "0.9"
 unicode-segmentation = "1.12"
 unicode-width = "0.2"
@@ -27,6 +29,3 @@ unicode-width = "0.2"
 [profile.release]
 lto = "thin"
 strip = true
-
-[dev-dependencies]
-tempfile = "3.20"

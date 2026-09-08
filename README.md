@@ -153,6 +153,8 @@ TTED itself has no runtime service or AI dependency. Git features require
 
 ## Build and run from a checkout
 
+Rust 1.88 or newer is required.
+
 ```sh
 cargo build
 cargo run -- .
@@ -161,7 +163,9 @@ cargo run -- file1.rs file2.rs
 ```
 
 With no filenames TTED opens an untitled buffer; Ctrl+S then prompts for a path.
-Passing a directory selects that workspace and opens its explorer.
+Passing a directory selects that workspace and opens its explorer. Save As asks
+before replacing an existing file. Saves preserve existing permissions and
+symlink targets; new files are created with private permissions.
 
 ## Keys
 

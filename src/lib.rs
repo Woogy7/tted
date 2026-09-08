@@ -4,6 +4,7 @@ pub mod config;
 pub mod diagnostics;
 pub mod editor;
 pub mod explorer;
+mod file_io;
 pub mod git;
 pub mod lsp;
 pub mod markdown;
