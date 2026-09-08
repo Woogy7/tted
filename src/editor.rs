@@ -12,16 +12,12 @@ use crossterm::event::{
 };
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
-use syntect::{
-    easy::HighlightLines,
-    highlighting::{FontStyle, Theme},
-    parsing::SyntaxSet,
-};
+use syntect::{highlighting::Theme, parsing::SyntaxSet};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -33,6 +29,7 @@ use crate::file_io::{file_stamp, FileStamp};
 use crate::git::GitService;
 use crate::lsp::{Diagnostic, LspEvent, LspService};
 use crate::quick_open::QuickOpen;
+use crate::syntax::SyntaxCache;
 use crate::theme;
 
 #[derive(Clone, Copy)]
@@ -138,6 +135,7 @@ pub struct Editor {
     split: Option<SplitState>,
     secondary_area: Option<Rect>,
     syntaxes: SyntaxSet,
+    syntax_cache: SyntaxCache,
     theme: Theme,
     message: String,
     quit_armed: bool,
@@ -224,6 +222,7 @@ impl Editor {
             split: None,
             secondary_area: None,
             syntaxes,
+            syntax_cache: SyntaxCache::default(),
             theme,
             message,
             quit_armed: false,
@@ -276,6 +275,7 @@ impl Editor {
                 self.sync_lsp_change();
             }
             redraw |= self.poll_lsp();
+            redraw |= self.syntax_cache.pending && !self.markdown_reading[self.active];
             if redraw {
                 terminal.draw(|frame| self.render(frame))?;
             }
@@ -1364,6 +1364,7 @@ impl Editor {
                     .or_else(|| themes.themes.get("base16-eighties.dark"))
                 {
                     self.theme = theme.clone();
+                    self.syntax_cache = SyntaxCache::default();
                 }
                 self.lsp = None;
                 self.lsp_extension = None;
@@ -2457,6 +2458,13 @@ impl Editor {
             let mut char_offset = 0usize;
             let content = raw.trim_end_matches(['\n', '\r']);
             for grapheme in content.graphemes(true) {
+                if !self.config.editor.word_wrap
+                    && screen_col
+                        >= self.left_col
+                            + usize::from(self.body.width.saturating_sub(self.gutter_width))
+                {
+                    break;
+                }
                 let char_count = grapheme.chars().count();
                 let width = UnicodeWidthStr::width(grapheme);
                 if screen_col + width > self.left_col {
@@ -3292,47 +3300,14 @@ impl Editor {
         );
     }
 
-    fn highlight_visible_lines(&self, start: usize, end: usize) -> Vec<Vec<Style>> {
-        let syntax = if let Some(path) = self.current().path() {
-            self.syntaxes.find_syntax_for_file(path).ok().flatten()
-        } else {
-            self.current()
-                .name()
-                .rsplit_once('.')
-                .and_then(|(_, extension)| self.syntaxes.find_syntax_by_extension(extension))
-        };
-        let Some(syntax) = syntax else {
-            return vec![Vec::new(); end - start];
-        };
-        let mut highlighter = HighlightLines::new(syntax, &self.theme);
-        let mut visible = Vec::with_capacity(end - start);
-        for line_index in 0..end {
-            let line = self.current().line(line_index);
-            let ranges = highlighter
-                .highlight_line(&line, &self.syntaxes)
-                .unwrap_or_default();
-            if line_index < start {
-                continue;
-            }
-            let mut styles = Vec::with_capacity(line.chars().count());
-            for (style, text) in ranges {
-                let foreground =
-                    Color::Rgb(style.foreground.r, style.foreground.g, style.foreground.b);
-                let mut terminal_style = Style::default().fg(foreground);
-                if style.font_style.contains(FontStyle::BOLD) {
-                    terminal_style = terminal_style.add_modifier(Modifier::BOLD);
-                }
-                if style.font_style.contains(FontStyle::ITALIC) {
-                    terminal_style = terminal_style.add_modifier(Modifier::ITALIC);
-                }
-                if style.font_style.contains(FontStyle::UNDERLINE) {
-                    terminal_style = terminal_style.add_modifier(Modifier::UNDERLINED);
-                }
-                styles.extend(std::iter::repeat_n(terminal_style, text.chars().count()));
-            }
-            visible.push(styles);
-        }
-        visible
+    fn highlight_visible_lines(&mut self, start: usize, end: usize) -> Vec<Vec<Style>> {
+        self.syntax_cache.highlight(
+            &self.buffers[self.active],
+            &self.syntaxes,
+            &self.theme,
+            start,
+            end,
+        )
     }
 }
 

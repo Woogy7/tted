@@ -4,6 +4,11 @@ All notable changes are documented here.
 
 ## Unreleased
 
+- Cache syntax parser checkpoints and visible styles, yielding between chunks
+  when scrolling deep into a file. Very long lines omit syntax colors.
+- Cache search matches by buffer revision and correctly map expanding Unicode
+  lowercase matches back to source positions. Limit unwrapped rendering to the viewport.
+
 - Make external reloads undoable, retain earlier editing history and line endings,
   and preserve cursor/selection context and viewport when text shifts.
 - Retry reads that change during loading and defer external prompts while another

@@ -6,6 +6,7 @@ editor loop; background workers never mutate UI state directly.
 
 - `file_io.rs`: atomic file replacement, metadata checks, and save destinations.
 - `buffer.rs`: Ropey text, cursors, selections, revisions, undo, persistence.
+- `syntax.rs`: incremental parser checkpoints and visible-line highlighting cache.
 - `editor.rs`: files/tabs/views, commands, input routing, layout, rendering.
 - `explorer.rs`: workspace tree and navigation.
 - `command.rs`: shared stable command registry and palette.

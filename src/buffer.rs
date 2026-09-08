@@ -1,6 +1,8 @@
 use std::{
+    cell::RefCell,
     fs, io,
     path::{Path, PathBuf},
+    rc::Rc,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
@@ -35,6 +37,13 @@ pub enum ExternalChange {
     Deleted,
 }
 
+struct SearchCache {
+    revision: u64,
+    query: String,
+    case_sensitive: bool,
+    matches: Rc<Vec<(usize, usize)>>,
+}
+
 pub struct Buffer {
     id: u64,
     text: Rope,
@@ -53,6 +62,7 @@ pub struct Buffer {
     edit_group: Option<(EditGroup, Instant)>,
     crlf: bool,
     disk_stamp: Option<FileStamp>,
+    search_cache: RefCell<Option<SearchCache>>,
 }
 
 impl Buffer {
@@ -97,6 +107,7 @@ impl Buffer {
             edit_group: None,
             crlf,
             disk_stamp,
+            search_cache: RefCell::new(None),
         }
     }
 
@@ -180,6 +191,10 @@ impl Buffer {
     pub fn len_chars(&self) -> usize {
         self.text.len_chars()
     }
+    pub(crate) fn rope(&self) -> &Rope {
+        &self.text
+    }
+
     pub fn text(&self) -> String {
         self.text.to_string()
     }
@@ -363,7 +378,26 @@ impl Buffer {
         start + chars
     }
 
-    fn search_ranges(&self, query: &str, case_sensitive: bool) -> Vec<(usize, usize)> {
+    fn search_ranges(&self, query: &str, case_sensitive: bool) -> Rc<Vec<(usize, usize)>> {
+        if let Some(cache) = self.search_cache.borrow().as_ref() {
+            if cache.revision == self.revision
+                && cache.query == query
+                && cache.case_sensitive == case_sensitive
+            {
+                return Rc::clone(&cache.matches);
+            }
+        }
+        let matches = Rc::new(self.compute_search_ranges(query, case_sensitive));
+        *self.search_cache.borrow_mut() = Some(SearchCache {
+            revision: self.revision,
+            query: query.to_owned(),
+            case_sensitive,
+            matches: Rc::clone(&matches),
+        });
+        matches
+    }
+
+    fn compute_search_ranges(&self, query: &str, case_sensitive: bool) -> Vec<(usize, usize)> {
         if query.is_empty() {
             return Vec::new();
         }
@@ -377,29 +411,25 @@ impl Buffer {
                 })
                 .collect();
         }
-        let chars = text.chars().collect::<Vec<_>>();
-        let query_chars = query.chars().count();
-        if query_chars > chars.len() {
-            return Vec::new();
+        let mut folded = String::with_capacity(text.len());
+        let mut boundaries = Vec::with_capacity(self.text.len_chars() + 1);
+        for character in text.chars() {
+            boundaries.push(folded.len());
+            folded.extend(character.to_lowercase());
         }
-        let folded_query = query.to_lowercase();
-        let mut matches = Vec::new();
-        let mut start = 0;
-        while start + query_chars <= chars.len() {
-            let end = start + query_chars;
-            if chars[start..end]
-                .iter()
-                .flat_map(|c| c.to_lowercase())
-                .eq(folded_query.chars())
-            {
-                matches.push((start, end));
-                start = end;
-            } else {
-                start += 1;
-            }
-        }
-        matches
+        boundaries.push(folded.len());
+        let query = query.to_lowercase();
+        folded
+            .match_indices(&query)
+            .filter_map(|(start, matched)| {
+                Some((
+                    boundaries.binary_search(&start).ok()?,
+                    boundaries.binary_search(&(start + matched.len())).ok()?,
+                ))
+            })
+            .collect()
     }
+
     pub fn selection(&self) -> Option<(usize, usize)> {
         self.anchor.filter(|a| *a != self.cursor).map(|a| {
             if a < self.cursor {
@@ -1351,5 +1381,37 @@ mod reload_tests {
         assert_eq!(buffer.cursor(), 2);
         buffer.backspace();
         assert_eq!(buffer.text(), "b");
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+    #[test]
+    fn unicode_case_search_maps_expanding_lowercase_to_original_ranges() {
+        let mut buffer = Buffer::empty();
+        buffer.insert("İstanbul İSTANBUL");
+        assert_eq!(
+            buffer.replace_all_search("i\u{307}stanbul", "city", false),
+            2
+        );
+        assert_eq!(buffer.text(), "city city");
+        buffer.undo();
+        assert_eq!(buffer.search_status("İSTANBUL", false).1, 2);
+    }
+    #[test]
+    fn cached_search_refreshes_after_edit_undo_and_reload() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("file");
+        fs::write(&path, "match").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        assert_eq!(buffer.search_status("match", true).1, 1);
+        buffer.insert("match ");
+        assert_eq!(buffer.search_status("match", true).1, 2);
+        buffer.undo();
+        assert_eq!(buffer.search_status("match", true).1, 1);
+        fs::write(&path, "none").unwrap();
+        buffer.reload_from_disk().unwrap();
+        assert_eq!(buffer.search_status("match", true).1, 0);
     }
 }

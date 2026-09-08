@@ -1259,5 +1259,5 @@ A small number of features that feel exceptionally good is more valuable than ra
 - [x] Remove integrated agent UI, transport, backend, and configuration.
 - [x] Harden save permissions, symlinks, conflicts, and replacement ranges.
 - [x] Preserve undo and cursor context across external reloads.
-- [ ] Improve large-file rendering and search responsiveness.
+- [x] Improve large-file rendering and search responsiveness.
 - [ ] Verify core keyboard, mouse, Git, and language-server workflows.

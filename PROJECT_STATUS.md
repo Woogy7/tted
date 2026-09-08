@@ -35,8 +35,10 @@ and configures a normal user's PATH.
 
 - Split layout is deliberately limited to two panes and is not a multiplexer.
 - Word wrapping is visual; editing coordinates remain tied to logical lines.
-- Undo snapshots are full ropes and syntax highlighting is recomputed for
-  visible lines, which are candidates for profiling-led optimization.
+- Undo snapshots share rope storage. Syntax highlighting caches parser states
+  and visible styles, yielding during long scans; lines over 16 KiB omit colors.
+- Search results are cached by revision; case-insensitive matching handles Unicode
+  lowercase expansions.
 - Explorer filtering is configurable but not yet gitignore-aware.
 - Language servers are optional external processes.
 - External tools edit files directly; there is no built-in chat or agent API.

@@ -10,4 +10,5 @@ pub mod lsp;
 pub mod markdown;
 pub mod quick_open;
 pub mod service;
+mod syntax;
 pub mod theme;
