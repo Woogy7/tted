@@ -1,26 +1,17 @@
 use std::{
     collections::HashMap,
-    fs::{self, File},
-    io::Read,
+    io::{Read, Seek},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        mpsc::{self, Receiver},
-    },
+    sync::mpsc::{self, Receiver},
     thread,
     time::{Duration, Instant},
 };
 
-use crate::diagnostics;
-
-static COMMAND_ID: AtomicU64 = AtomicU64::new(0);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FileStamp {
-    len: u64,
-    modified_ms: u128,
-}
+use crate::{
+    diagnostics,
+    file_io::{file_stamp, FileStamp},
+};
 
 #[derive(Clone, Debug, Default)]
 pub struct GitSnapshot {
@@ -29,6 +20,7 @@ pub struct GitSnapshot {
     pub files: HashMap<PathBuf, char>,
     pub lines: HashMap<PathBuf, HashMap<usize, char>>,
     diff_text: String,
+    head: Option<Vec<u8>>,
     stamps: HashMap<PathBuf, FileStamp>,
 }
 
@@ -260,25 +252,32 @@ fn read_snapshot(workspace: &Path, previous: &GitSnapshot) -> GitSnapshot {
     };
     let (branch, files) = parse_status(&output);
     let stamps = collect_stamps(&root, &files);
+    let head = run_git(
+        &root,
+        &["rev-parse", "--verify", "HEAD"],
+        Duration::from_secs(2),
+    );
     let unchanged = previous.root.as_ref() == Some(&root)
+        && previous.head == head
         && previous.files == files
         && previous.stamps == stamps;
     let (mut lines, diff_text) = if unchanged {
         (previous.lines.clone(), previous.diff_text.clone())
     } else {
-        let diff = run_git(
-            &root,
-            &[
-                "diff",
-                "--no-ext-diff",
-                "--no-color",
-                "--unified=0",
-                "HEAD",
-                "--",
-            ],
-            Duration::from_secs(4),
-        )
-        .unwrap_or_default();
+        let mut arguments = vec!["diff", "--no-ext-diff", "--no-color", "--unified=0"];
+        arguments.push(if head.is_some() { "HEAD" } else { "--cached" });
+        arguments.push("--");
+        let mut diff = run_git(&root, &arguments, Duration::from_secs(4)).unwrap_or_default();
+        if head.is_none() {
+            diff.extend(
+                run_git(
+                    &root,
+                    &["diff", "--no-ext-diff", "--no-color", "--unified=0", "--"],
+                    Duration::from_secs(4),
+                )
+                .unwrap_or_default(),
+            );
+        }
         (
             parse_diff(&diff),
             String::from_utf8_lossy(&diff).into_owned(),
@@ -299,6 +298,7 @@ fn read_snapshot(workspace: &Path, previous: &GitSnapshot) -> GitSnapshot {
         files,
         lines,
         diff_text,
+        head,
         stamps,
     }
 }
@@ -306,46 +306,29 @@ fn read_snapshot(workspace: &Path, previous: &GitSnapshot) -> GitSnapshot {
 fn collect_stamps(root: &Path, files: &HashMap<PathBuf, char>) -> HashMap<PathBuf, FileStamp> {
     files
         .keys()
-        .filter_map(|path| {
-            let metadata = fs::metadata(root.join(path)).ok()?;
-            let modified_ms = metadata
-                .modified()
-                .ok()?
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()?
-                .as_millis();
-            Some((
-                path.clone(),
-                FileStamp {
-                    len: metadata.len(),
-                    modified_ms,
-                },
-            ))
-        })
+        .filter_map(|path| Some((path.clone(), file_stamp(&root.join(path)).ok()??)))
         .collect()
 }
 
 fn run_git(root: &Path, args: &[&str], timeout: Duration) -> Option<Vec<u8>> {
-    let id = COMMAND_ID.fetch_add(1, Ordering::Relaxed);
-    let output_path =
-        std::env::temp_dir().join(format!("tted-git-{}-{id}.out", std::process::id()));
-    let output_file = File::create(&output_path).ok()?;
+    let mut output_file = tempfile::tempfile().ok()?;
+    let child_output = output_file.try_clone().ok()?;
     let started = Instant::now();
     diagnostics::log(&format!("git start: {}", args.join(" ")));
     let mut child = match Command::new("git")
+        .args(["-c", "core.quotePath=false"])
         .arg("-C")
         .arg(root)
         .args(args)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
-        .stdout(Stdio::from(output_file))
+        .stdout(Stdio::from(child_output))
         .stderr(Stdio::null())
         .spawn()
     {
         Ok(child) => child,
         Err(error) => {
-            let _ = fs::remove_file(&output_path);
             diagnostics::log(&format!("git spawn error: {error}"));
             return None;
         }
@@ -366,15 +349,17 @@ fn run_git(root: &Path, args: &[&str], timeout: Duration) -> Option<Vec<u8>> {
             }
             Err(error) => {
                 diagnostics::log(&format!("git wait error: {error}"));
+                let _ = child.kill();
+                let _ = child.wait();
                 break false;
             }
         }
     };
     let mut output = Vec::new();
     if success {
-        let _ = File::open(&output_path).and_then(|mut file| file.read_to_end(&mut output));
+        output_file.rewind().ok()?;
+        output_file.read_to_end(&mut output).ok()?;
     }
-    let _ = fs::remove_file(&output_path);
     diagnostics::log(&format!(
         "git end: success={success} elapsed={}ms bytes={}",
         started.elapsed().as_millis(),
@@ -388,6 +373,12 @@ fn parse_diff(output: &[u8]) -> HashMap<PathBuf, HashMap<usize, char>> {
     let mut result = HashMap::<PathBuf, HashMap<usize, char>>::new();
     let mut current = None;
     for line in text.lines() {
+        if line.starts_with("diff --git ") {
+            current = None;
+        }
+        if let Some(path) = line.strip_prefix("--- a/") {
+            current = Some(PathBuf::from(path));
+        }
         if let Some(path) = line.strip_prefix("+++ b/") {
             current = Some(PathBuf::from(path));
             continue;
@@ -528,5 +519,70 @@ mod tests {
         let file = snapshot.file_diff(Path::new("/repo/src/a.rs"));
         assert!(file.contains("+new"));
         assert!(!file.contains("src/b.rs"));
+    }
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+    fn git(root: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(["-C"])
+            .arg(root)
+            .args([
+                "-c",
+                "user.name=TTED Tests",
+                "-c",
+                "user.email=tests@example.invalid",
+                "-c",
+                "commit.gpgSign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    #[test]
+    fn diff_refreshes_when_head_moves_without_worktree_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let path = root.join("file.txt");
+        git(root, &["init"]);
+        std::fs::write(&path, "base zero\n").unwrap();
+        git(root, &["add", "file.txt"]);
+        git(root, &["commit", "-m", "first"]);
+        std::fs::write(&path, "base one\n").unwrap();
+        git(root, &["add", "file.txt"]);
+        git(root, &["commit", "-m", "second"]);
+        std::fs::write(&path, "working\n").unwrap();
+        let previous = read_snapshot(root, &GitSnapshot::default());
+        assert!(previous.workspace_diff().contains("-base one"));
+        git(root, &["reset", "--soft", "HEAD~1"]);
+        let updated = read_snapshot(root, &previous);
+        assert_eq!(previous.files, updated.files);
+        assert_eq!(previous.stamps, updated.stamps);
+        assert!(updated.workspace_diff().contains("-base zero"));
+    }
+    #[test]
+    fn staged_diff_is_visible_before_first_commit() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        git(root, &["init"]);
+        std::fs::write(root.join("new.txt"), "first\n").unwrap();
+        git(root, &["add", "new.txt"]);
+        assert!(read_snapshot(root, &GitSnapshot::default())
+            .workspace_diff()
+            .contains("+first"));
+    }
+    #[test]
+    fn deletion_hunks_do_not_attach_to_previous_file() {
+        let diff=b"diff --git a/first b/first\n--- a/first\n+++ b/first\n@@ -1 +1 @@\n-a\n+b\ndiff --git a/deleted b/deleted\n--- a/deleted\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-a\n-b\n";
+        let lines = parse_diff(diff);
+        assert_eq!(lines[Path::new("first")][&1], 'M');
+        assert_eq!(lines[Path::new("deleted")][&1], 'D');
     }
 }

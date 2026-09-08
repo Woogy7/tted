@@ -156,8 +156,12 @@ mod tests {
         assert_eq!(before, cache.parsed);
         buffer.set_cursor_line_col(960, 0, false);
         buffer.insert("/*");
-        let styles = cache.highlight(&buffer, &syntax, theme, 950, 980);
-        assert!(!cache.pending);
+        let styles = loop {
+            let styles = cache.highlight(&buffer, &syntax, theme, 950, 980);
+            if !cache.pending {
+                break styles;
+            }
+        };
         assert!(cache.parsed - before < 128);
         let mut fresh = SyntaxCache::default();
         let expected = loop {

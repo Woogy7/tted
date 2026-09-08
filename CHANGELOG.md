@@ -4,6 +4,9 @@ All notable changes are documented here.
 
 ## Unreleased
 
+- Refresh Git diffs when HEAD moves, show staged changes before the first commit,
+  isolate deletion markers by file, and capture Git output in anonymous temporary files.
+
 - Reject stale or invalid language-server edit batches before changing any buffer.
   Synchronize all matching open documents, preserve pending edits across tab switches,
   handle close/reopen, and use UTF-16 positions and escaped file URIs.
