@@ -254,7 +254,10 @@ clicking an inactive pane focuses it.
 When an open file changes on disk, TTED reloads it automatically if the editor
 buffer is clean. If unsaved edits could be lost, use `R` to reload the disk
 version or `K` to keep the editor version. Deleted files can be kept and recreated
-with Save.
+with Save. Reloads preserve earlier undo history and follow the cursor and
+selection through unchanged text. Ctrl+Z can recover the pre-reload version,
+including unsaved edits discarded with `R`; that recovered version is marked
+unsaved until you save it.
 
 ## Development
 

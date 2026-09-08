@@ -43,3 +43,10 @@ and configures a normal user's PATH.
 
 See `ROADMAP.md` for phase history and `FINAL_TEST_CHECKLIST.md` for the
 release-candidate hands-on pass.
+
+## September 2026 editing improvements
+
+Integrated agent features have been removed. Saves preserve file permissions and
+symlink targets, confirm Save As overwrites, and check for disk conflicts before
+replacement. External reloads preserve earlier undo history and cursor/selection
+context; even discarded unsaved edits can be recovered with Undo.

@@ -1705,7 +1705,7 @@ impl Editor {
             return Ok(false);
         };
         match key.code {
-            KeyCode::Char('r' | 'R') => match self.buffers[prompt.buffer].reload_from_disk() {
+            KeyCode::Char('r' | 'R') => match self.reload_buffer(prompt.buffer) {
                 Ok(()) => {
                     self.external_prompt = None;
                     self.message = "Reloaded file from disk".into();
@@ -1728,10 +1728,44 @@ impl Editor {
         Ok(false)
     }
 
+    fn reload_buffer(&mut self, index: usize) -> io::Result<()> {
+        let old_line = self.buffers[index].cursor_line_col().0;
+        self.buffers[index].reload_from_disk()?;
+        if index == self.active {
+            let new_line = self.current().cursor_line_col().0;
+            self.top_line = self
+                .top_line
+                .saturating_add(new_line)
+                .saturating_sub(old_line);
+            self.top_line = self.top_line.min(self.document_max_top());
+            self.ensure_visible();
+        }
+        if let (Some(lsp), Some(path)) = (&self.lsp, self.buffers[index].path()) {
+            if path.extension().and_then(|s| s.to_str()) == self.lsp_extension.as_deref() {
+                lsp.change(
+                    path.to_path_buf(),
+                    self.buffers[index].revision() as i64 + 1,
+                    self.buffers[index].text(),
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn check_external_files(&mut self) -> bool {
         if self.external_prompt.is_some()
             || self.overwrite_prompt.is_some()
             || self.path_prompt.is_some()
+            || self.close_armed.is_some()
+            || self.delete_confirm.is_some()
+            || self.git_discard_confirm.is_some()
+            || self.git_commit_prompt.is_some()
+            || self.explorer_prompt.is_some()
+            || self.lsp_prompt.is_some()
+            || self.keybindings_menu.is_some()
+            || self.search.is_some()
+            || self.quick_open.is_some()
+            || self.command_palette.is_some()
         {
             return false;
         }
@@ -1739,7 +1773,7 @@ impl Editor {
             match self.buffers[index].check_external_change() {
                 Ok(ExternalChange::None) => {}
                 Ok(ExternalChange::Modified) if !self.buffers[index].is_dirty() => {
-                    match self.buffers[index].reload_from_disk() {
+                    match self.reload_buffer(index) {
                         Ok(()) => {
                             self.message = format!(
                                 "Reloaded {} after an external change",
@@ -1755,7 +1789,8 @@ impl Editor {
                 }
                 Ok(change) => {
                     self.active = index;
-                    self.reset_view();
+                    self.update_active_split_buffer();
+                    self.ensure_visible();
                     self.external_prompt = Some(ExternalPrompt {
                         buffer: index,
                         change,

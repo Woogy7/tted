@@ -7,7 +7,7 @@ use std::{
 
 static NEXT_BUFFER_ID: AtomicU64 = AtomicU64::new(1);
 
-use crate::file_io::{absolute_path, atomic_write, file_stamp, FileStamp};
+use crate::file_io::{absolute_path, atomic_write, file_stamp, read_document, FileStamp};
 use ropey::Rope;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -18,6 +18,7 @@ struct Snapshot {
     cursor: usize,
     anchor: Option<usize>,
     content_id: u64,
+    crlf: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -68,20 +69,10 @@ impl Buffer {
 
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = absolute_path(path.as_ref())?;
-        let bytes = fs::read(&path)?;
-        let source = String::from_utf8(bytes).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "TTED v0.1 only edits UTF-8 text",
-            )
-        })?;
-        let crlf = source.contains("\r\n");
-        let normalized = if crlf {
-            source.replace("\r\n", "\n")
-        } else {
-            source
-        };
-        Ok(Self::from_text(normalized, Some(path.to_path_buf()), crlf))
+        let (text, crlf, stamp) = read_document(&path)?;
+        let mut buffer = Self::from_text(text, Some(path), crlf);
+        buffer.disk_stamp = stamp;
+        Ok(buffer)
     }
 
     fn from_text(text: String, path: Option<PathBuf>, crlf: bool) -> Self {
@@ -460,6 +451,7 @@ impl Buffer {
             cursor: self.cursor,
             anchor: self.anchor,
             content_id: self.content_id,
+            crlf: self.crlf,
         });
     }
     fn finish_edit(&mut self) {
@@ -584,7 +576,9 @@ impl Buffer {
                 cursor: self.cursor,
                 anchor: self.anchor,
                 content_id: self.content_id,
+                crlf: self.crlf,
             });
+            self.crlf = previous.crlf;
             self.text = previous.text;
             self.cursor = previous.cursor;
             self.anchor = previous.anchor;
@@ -601,7 +595,9 @@ impl Buffer {
                 cursor: self.cursor,
                 anchor: self.anchor,
                 content_id: self.content_id,
+                crlf: self.crlf,
             });
+            self.crlf = next.crlf;
             self.text = next.text;
             self.cursor = next.cursor;
             self.anchor = next.anchor;
@@ -810,6 +806,7 @@ impl Buffer {
         })
     }
 
+    /// External reloads are one undoable transaction; earlier edits stay recoverable.
     pub fn reload_from_disk(&mut self) -> io::Result<()> {
         let path = self.path.as_ref().ok_or_else(|| {
             io::Error::new(
@@ -817,32 +814,64 @@ impl Buffer {
                 "cannot reload an untitled buffer",
             )
         })?;
-        let bytes = fs::read(path)?;
-        let source = String::from_utf8(bytes).map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "external file is not valid UTF-8",
-            )
-        })?;
-        self.crlf = source.contains("\r\n");
-        let normalized = if self.crlf {
-            source.replace("\r\n", "\n")
-        } else {
-            source
-        };
-        self.text = Rope::from_str(&normalized);
-        self.cursor = self.cursor.min(self.text.len_chars());
-        self.anchor = None;
-        self.preferred_col = None;
-        self.undo.clear();
-        self.redo.clear();
-        self.edit_group = None;
-        self.revision = self.revision.wrapping_add(1);
-        self.content_id = self.next_content_id;
-        self.next_content_id = self.next_content_id.wrapping_add(1);
+        let (text, crlf, stamp) = read_document(path)?;
+        let updated = Rope::from_str(&text);
+        if updated != self.text || self.crlf != crlf {
+            let prefix = self
+                .text
+                .chars()
+                .zip(updated.chars())
+                .take_while(|(a, b)| a == b)
+                .count();
+            let suffix_limit = self.text.len_chars().min(updated.len_chars()) - prefix;
+            let suffix = self
+                .text
+                .chars_at(self.text.len_chars())
+                .reversed()
+                .zip(updated.chars_at(updated.len_chars()).reversed())
+                .take(suffix_limit)
+                .take_while(|(a, b)| a == b)
+                .count();
+            let old_end = self.text.len_chars() - suffix;
+            let new_end = updated.len_chars() - suffix;
+            let map = |position: usize| {
+                if position < prefix {
+                    position
+                } else if position >= old_end {
+                    new_end + position - old_end
+                } else {
+                    prefix + (position - prefix).min(new_end - prefix)
+                }
+            };
+            self.checkpoint();
+            self.cursor = map(self.cursor);
+            self.anchor = self.anchor.map(map);
+            self.text = updated;
+            self.crlf = crlf;
+            self.finish_edit();
+            // A change can combine adjacent Unicode code points into one grapheme.
+            self.cursor = self.grapheme_floor(self.cursor);
+            self.anchor = self.anchor.map(|position| self.grapheme_floor(position));
+        }
         self.saved_content_id = self.content_id;
-        self.disk_stamp = file_stamp(path)?;
+        self.disk_stamp = stamp;
+        self.edit_group = None;
         Ok(())
+    }
+
+    fn grapheme_floor(&self, position: usize) -> usize {
+        let line = self.text.char_to_line(position);
+        let start = self.text.line_to_char(line);
+        let content = self.text.line(line).to_string();
+        let mut boundary = start;
+        for grapheme in content.graphemes(true) {
+            let next = boundary + grapheme.chars().count();
+            if next > position {
+                break;
+            }
+            boundary = next;
+        }
+        boundary
     }
 
     pub fn keep_after_external_change(&mut self) {
@@ -1251,5 +1280,76 @@ mod safety_tests {
             "changed while confirming"
         );
         assert!(buffer.path().is_none());
+    }
+}
+
+#[cfg(test)]
+mod reload_tests {
+    use super::*;
+    #[test]
+    fn external_reload_preserves_cursor_selection_and_earlier_undo() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("file");
+        fs::write(&path, "alpha\nbeta\n").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        buffer.insert("human\n");
+        buffer.save().unwrap();
+        buffer.set_cursor_line_col(2, 0, false);
+        buffer.move_horizontal(1, true);
+        fs::write(&path, "external\nhuman\nalpha\nbeta\n").unwrap();
+        buffer.reload_from_disk().unwrap();
+        assert_eq!(buffer.cursor_line_col(), (3, 1));
+        assert_eq!(buffer.selected_text().as_deref(), Some("b"));
+        assert!(!buffer.is_dirty());
+        buffer.undo();
+        assert_eq!(buffer.text(), "human\nalpha\nbeta\n");
+        assert_eq!(buffer.cursor_line_col(), (2, 1));
+        assert!(buffer.is_dirty());
+        buffer.redo();
+        assert!(!buffer.is_dirty());
+        buffer.undo();
+        buffer.undo();
+        assert_eq!(buffer.text(), "alpha\nbeta\n");
+    }
+    #[test]
+    fn reload_keeps_unsaved_text_recoverable_and_restores_line_endings() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("file");
+        fs::write(&path, "original\r\n").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        buffer.insert("unsaved ");
+        fs::write(&path, "external\n").unwrap();
+        buffer.reload_from_disk().unwrap();
+        assert!(!buffer.is_dirty());
+        buffer.undo();
+        assert_eq!(buffer.text(), "unsaved original\n");
+        buffer.save().unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), "unsaved original\r\n");
+    }
+    #[test]
+    fn identical_external_rewrite_does_not_add_an_undo_step() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("file");
+        fs::write(&path, "original").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        buffer.insert("edit ");
+        buffer.save().unwrap();
+        fs::write(&path, "edit original").unwrap();
+        buffer.reload_from_disk().unwrap();
+        buffer.undo();
+        assert_eq!(buffer.text(), "original");
+    }
+    #[test]
+    fn reload_cursor_stays_on_grapheme_boundary() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("file");
+        fs::write(&path, "ab").unwrap();
+        let mut buffer = Buffer::open(&path).unwrap();
+        buffer.move_horizontal(1, false);
+        fs::write(&path, "a\u{301}b").unwrap();
+        buffer.reload_from_disk().unwrap();
+        assert_eq!(buffer.cursor(), 2);
+        buffer.backspace();
+        assert_eq!(buffer.text(), "b");
     }
 }

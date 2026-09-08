@@ -88,3 +88,32 @@ pub(crate) fn atomic_write(
     fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
+
+/// Read a coherent UTF-8 document, retrying if an external writer changes it.
+pub(crate) fn read_document(path: &Path) -> io::Result<(String, bool, Option<FileStamp>)> {
+    for _ in 0..3 {
+        let before = file_stamp(path)?;
+        let bytes = fs::read(path)?;
+        let after = file_stamp(path)?;
+        if before != after {
+            continue;
+        }
+        let source = String::from_utf8(bytes).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "TTED only edits UTF-8 text")
+        })?;
+        let crlf = source.contains("\r\n");
+        return Ok((
+            if crlf {
+                source.replace("\r\n", "\n")
+            } else {
+                source
+            },
+            crlf,
+            after,
+        ));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::WouldBlock,
+        "file is changing; try reloading again",
+    ))
+}

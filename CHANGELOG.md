@@ -4,6 +4,11 @@ All notable changes are documented here.
 
 ## Unreleased
 
+- Make external reloads undoable, retain earlier editing history and line endings,
+  and preserve cursor/selection context and viewport when text shifts.
+- Retry reads that change during loading and defer external prompts while another
+  editing dialog is active.
+
 - Preserve file permissions and symlinks when saving; use unique, synced temporary
   files and recheck disk changes before replacement. Save As confirms overwrites.
 - Reject overlapping range edits and fix overlapping case-insensitive Replace All.
