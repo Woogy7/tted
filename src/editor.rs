@@ -250,13 +250,19 @@ impl Editor {
     }
 
     pub fn run(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+        let mut performance = crate::diagnostics::Performance::default();
+        let started = Instant::now();
         terminal.draw(|frame| self.render(frame))?;
+        performance.render(started.elapsed());
         let mut last_disk_check = Instant::now();
         loop {
             let mut redraw = false;
             if event::poll(Duration::from_millis(100))? {
                 let event = event::read()?;
-                if self.handle_event(event)? {
+                let started = Instant::now();
+                let quit = self.handle_event(event)?;
+                performance.input(started.elapsed());
+                if quit {
                     return Ok(());
                 }
                 redraw = true;
@@ -280,8 +286,11 @@ impl Editor {
             redraw |= self.poll_lsp();
             redraw |= self.syntax_cache.pending && !self.markdown_reading[self.active];
             if redraw {
+                let started = Instant::now();
                 terminal.draw(|frame| self.render(frame))?;
+                performance.render(started.elapsed());
             }
+            performance.tick();
         }
     }
 

@@ -13,7 +13,7 @@ use crate::{
     file_io::{file_stamp, FileStamp},
 };
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GitSnapshot {
     pub root: Option<PathBuf>,
     pub branch: Option<String>,
@@ -131,9 +131,9 @@ impl GitService {
     pub fn tick(&mut self) -> bool {
         let mut changed = false;
         while let Ok(snapshot) = self.receiver.try_recv() {
+            changed |= self.snapshot != snapshot;
             self.snapshot = snapshot;
             self.pending = false;
-            changed = true;
         }
         if !self.pending && self.last_request.elapsed() >= Duration::from_secs(5) {
             self.request_refresh();
@@ -336,7 +336,14 @@ fn run_git(root: &Path, args: &[&str], timeout: Duration) -> Option<Vec<u8>> {
     let success = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status.success(),
-            Ok(None) if started.elapsed() < timeout => thread::sleep(Duration::from_millis(25)),
+            Ok(None) if started.elapsed() < timeout => {
+                let interval = if started.elapsed() < Duration::from_millis(100) {
+                    2
+                } else {
+                    25
+                };
+                thread::sleep(Duration::from_millis(interval));
+            }
             Ok(None) => {
                 diagnostics::log(&format!(
                     "git timeout after {}ms: {}",

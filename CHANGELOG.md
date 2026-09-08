@@ -4,6 +4,9 @@ All notable changes are documented here.
 
 ## Unreleased
 
+- Remove the fixed 25 ms Git polling floor and avoid redraws for unchanged Git
+  snapshots. Log aggregate input/render timings without recording keys or text.
+
 - Refresh Git diffs when HEAD moves, show staged changes before the first commit,
   isolate deletion markers by file, and capture Git output in anonymous temporary files.
 
