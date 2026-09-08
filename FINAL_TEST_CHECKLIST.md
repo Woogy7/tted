@@ -23,7 +23,8 @@ tmux, Herdr, and SSH.
 - [ ] Tabs click/close/cycle; Ctrl+E explorer and Ctrl+P Quick Open work.
 - [ ] Ctrl+F find/replace, Ctrl+Shift+P palette, F1 help, F11 Focus Mode work.
 - [ ] Syntax colors, line numbers, word wrap, splits, and mouse focus render well.
-- [ ] Markdown reader toggles and scrolls by arrows, pages, and mouse wheel.
+- [ ] Markdown live preview supports typing, Shift+Home/End selection, mouse
+      positioning, paste/undo, and a full-source toggle.
 
 ## Integrations
 

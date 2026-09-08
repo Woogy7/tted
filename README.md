@@ -17,7 +17,7 @@ changes without running an integrated chat service.
 - dirty indicators and protection against accidentally quitting with changes
 - reliable terminal cleanup through an RAII guard
 - file-aware syntax highlighting for common programming and markup languages
-- a formatted Markdown reading view with clickable task checkboxes
+- editable Markdown live preview with clickable task checkboxes
 - a Catppuccin Mocha-inspired editor interface
 - a collapsible workspace tree with keyboard and mouse navigation
 - grapheme-aware movement and deletion with terminal-cell-aware cursor placement
@@ -188,7 +188,7 @@ symlink targets; new files are created with private permissions.
 | Ctrl+Tab / Ctrl+PageDown | Next tab |
 | Ctrl+Shift+Tab / Ctrl+PageUp | Previous tab |
 | Alt+Left / Alt+Right | Previous / next tab (portable fallback) |
-| Ctrl+Shift+M / F6 | Toggle Markdown source / reading view |
+| Ctrl+Shift+M / F6 | Toggle Markdown source / live preview |
 | F11 | Toggle document-only Focus Mode |
 | Ctrl+Q | Quit; press twice when changes are unsaved |
 | F1 | Show keybindings help |
@@ -214,9 +214,15 @@ Ctrl+F opens centered Find and Replace. Enter and Shift+Enter move to the next
 and previous matches, Tab switches fields, Alt+C toggles case sensitivity,
 Ctrl+R replaces the current match, and Ctrl+Shift+R replaces all matches.
 
-In Markdown reading view, click a rendered `[ ]` or `[x]` task checkbox to
+F6 toggles Markdown live preview. The active line shows its Markdown syntax
+while retaining live text styling; surrounding lines stay formatted. Type, select, paste, search, and undo as in
+source mode. Click formatted text to place the cursor in its source line.
+Selected lines reveal their syntax so the exact selection stays visible.
+Shift+Home and Shift+End select to the start or end of the active line.
+
+In Markdown live preview, click a rendered `[ ]` or `[x]` task checkbox to
 toggle the corresponding source item. Checkbox changes are normal undoable,
-saveable edits; the rest of the formatted view remains non-editable.
+saveable edits. Click elsewhere in the document to continue editing.
 
 F2 opens the Command Palette reliably in every terminal. Ctrl+Shift+P also works
 when the terminal distinguishes it from Ctrl+P. Commands can be found by fuzzy title or
@@ -239,6 +245,8 @@ deletion points in red.
 
 TTED writes lightweight diagnostic and Git-worker timing logs to
 `/tmp/tted-<pid>.log`. Set `TTED_LOG=/path/to/file.log` to choose another path.
+Logs also contain aggregate input-processing and render timings in microseconds every five seconds
+while active and on exit. These timings do not record document text or typed keys.
 
 Language servers are configured by extension in `.tted.toml`; copy
 `.tted.example.toml` as a starting point. Diagnostics appear in the gutter,

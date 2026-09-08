@@ -16,7 +16,7 @@ Press F1 in TTED for the built-in quick reference. The most common bindings are:
 | Ctrl+W / Ctrl+Q | Close tab, quit |
 | Ctrl+Tab / Ctrl+Shift+Tab | Next/previous tab |
 | Alt+Right / Alt+Left | Portable next/previous tab fallback |
-| Ctrl+Shift+M or F6 | Markdown source/reader |
+| Ctrl+Shift+M or F6 | Markdown source/live preview |
 | F8 | Problems / next diagnostic |
 | F11 | Focus Mode |
 | F1 | Help |
@@ -35,3 +35,8 @@ Command Palette instead of Ctrl+Shift+P.
 Press F3 to open the Keybindings menu. Select an action with arrows or the
 mouse, then press Enter (or click it again) and type the new shortcut. Delete
 resets the selected custom binding. Changes are saved for the workspace.
+
+Markdown live preview uses the normal editing keys, including Shift+Home/End,
+selection, paste, undo, and find/replace. The active and selected lines show their
+source syntax; other lines stay formatted. Mouse clicks position the caret in
+text or toggle task checkboxes.

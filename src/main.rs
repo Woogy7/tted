@@ -7,7 +7,8 @@ use anyhow::{Context, Result};
 use crossterm::{
     event::{
         DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-        EnableFocusChange, EnableMouseCapture,
+        EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -20,6 +21,7 @@ impl Drop for TerminalGuard {
         let _ = disable_raw_mode();
         let _ = execute!(
             stdout(),
+            PopKeyboardEnhancementFlags,
             DisableMouseCapture,
             DisableBracketedPaste,
             DisableFocusChange,
@@ -60,6 +62,7 @@ fn main() -> Result<()> {
         EnableMouseCapture,
         EnableBracketedPaste,
         EnableFocusChange,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
         crossterm::cursor::Show
     )
     .context("initialize terminal")?;

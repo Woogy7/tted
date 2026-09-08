@@ -11,6 +11,12 @@ The phases below are historical development records; agent phases 8, 9, and 12
 are retired and do not describe current features. Earlier implementation remains
 in Git history.
 
+## Follow-up from editor testing
+
+- [x] Add editable Markdown live preview with a full-source toggle.
+- [x] Keep Shift+Home/End selection available in preview; test terminal sequences.
+- [x] Cache Markdown parsing, avoid unchanged Git redraws, and record UI timings.
+
 ## Historical roadmap
 
 TTED — **Terminal Text Editor**, pronounced “Ted” — is a modern, intuitive, mouse-friendly and agent-native terminal text editor.

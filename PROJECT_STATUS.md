@@ -11,7 +11,7 @@ Historical agent phases in the roadmap are retired.
 - Mouse and familiar keyboard navigation, searchable command palette, F1 help,
   Focus Mode, quick open, find/replace, collapsible explorer, and split views.
 - File-aware syntax highlighting, configurable line numbers/wrapping, and an
-  editable/rendered Markdown toggle.
+  editable Markdown live preview with a full-source toggle.
 - Background Git status/diffs and safe stage, unstage, discard, and commit.
 - Configured LSP lifecycle, diagnostics, Problems panel, hover, definition,
   completion, references, rename, code actions, formatting, symbols, and
@@ -57,9 +57,16 @@ context; even discarded unsaved edits can be recovered with Undo.
 
 ## Validation — 2026-09-08
 
-96 automated tests, formatting, Clippy with warnings denied, and the release
+103 automated tests, formatting, Clippy with warnings denied, and the release
 build pass. Real pseudo-terminal checks cover paste/save, permissions, external
 reload and undo, dirty conflicts, resize, and terminal restoration. A controlled
 language-server process verifies document open/close, stale-format rejection,
 and child cleanup. Git refresh tests use temporary repositories. Cross-platform
 release installation and interactive SSH/tmux testing remain release checks.
+
+Markdown live preview supports normal editing and selection, revealing syntax on
+the active/selected lines while retaining live styling. Parsed Markdown is cached
+by revision. Shift+Home/End uses the same selection behavior as source mode.
+Diagnostics now aggregate frame-render and input-processing timings without
+recording document contents. Unchanged Git snapshots no longer redraw the UI,
+and quick Git commands use a shorter polling interval.

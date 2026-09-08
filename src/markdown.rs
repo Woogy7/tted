@@ -14,122 +14,284 @@ pub struct TaskMarker {
     pub checked: bool,
 }
 
+#[derive(Clone, Debug)]
+struct SourceRun {
+    source_start: usize,
+    source_end: usize,
+    exact: bool,
+}
+
 pub struct RenderedMarkdown {
     pub lines: Vec<Line<'static>>,
     pub tasks: Vec<TaskMarker>,
+    runs: Vec<Vec<SourceRun>>,
+    line_starts: Vec<usize>,
+}
+
+impl RenderedMarkdown {
+    pub fn source_style(&self, row: usize, position: usize) -> Style {
+        self.lines
+            .get(row)
+            .into_iter()
+            .flat_map(|line| line.spans.iter())
+            .zip(self.runs.get(row).into_iter().flatten())
+            .find_map(|(span, run)| {
+                (position >= run.source_start && position < run.source_end).then_some(span.style)
+            })
+            .unwrap_or_else(|| Style::default().fg(theme::SUBTEXT0))
+    }
+
+    /// Map a click in formatted text back to a source character column.
+    pub fn source_column(&self, row: usize, column: usize) -> usize {
+        use unicode_segmentation::UnicodeSegmentation;
+        use unicode_width::UnicodeWidthStr;
+        let Some(line) = self.lines.get(row) else {
+            return 0;
+        };
+        let start = self.line_starts[row];
+        let mut screen = 0;
+        for (span, run) in line.spans.iter().zip(&self.runs[row]) {
+            let width = UnicodeWidthStr::width(span.content.as_ref());
+            if column < screen + width {
+                if !run.exact {
+                    return if column - screen < width / 2 {
+                        run.source_start
+                    } else {
+                        run.source_end
+                    }
+                    .saturating_sub(start);
+                }
+                let mut offset = 0;
+                for grapheme in span.content.graphemes(true) {
+                    let width = UnicodeWidthStr::width(grapheme);
+                    if screen + width > column {
+                        break;
+                    }
+                    screen += width;
+                    offset += grapheme.chars().count();
+                }
+                return run.source_start + offset - start;
+            }
+            screen += width;
+        }
+        self.runs[row]
+            .last()
+            .map_or(0, |run| run.source_end.saturating_sub(start))
+    }
 }
 
 pub fn render(source: &str) -> Vec<Line<'static>> {
     render_document(source).lines
 }
 
+/// Keep one display row per source line. The editor can reveal any active line
+/// without moving the surrounding document or losing source coordinates.
 pub fn render_document(source: &str) -> RenderedMarkdown {
-    let mut lines = Vec::new();
-    let mut tasks = Vec::new();
-    let mut current = Vec::new();
-    let mut style = Style::default();
-    let mut list_depth = 0usize;
-
-    let finish = |lines: &mut Vec<Line<'static>>, current: &mut Vec<Span<'static>>| {
-        lines.push(Line::from(std::mem::take(current)));
+    let mut byte_starts = vec![0];
+    let mut char_starts = vec![0];
+    let mut char_bytes = Vec::new();
+    for (index, (byte, character)) in source.char_indices().enumerate() {
+        char_bytes.push(byte);
+        if character == '\n' {
+            byte_starts.push(byte + 1);
+            char_starts.push(index + 1);
+        }
+    }
+    let mut document = RenderedMarkdown {
+        lines: vec![Line::default(); byte_starts.len()],
+        tasks: Vec::new(),
+        runs: vec![Vec::new(); byte_starts.len()],
+        line_starts: char_starts.clone(),
     };
-
-    for (event, source_range) in Parser::new_ext(source, Options::all()).into_offset_iter() {
+    char_bytes.push(source.len());
+    let char_offset = |byte: usize| {
+        char_bytes
+            .binary_search(&byte)
+            .expect("parser source offsets are UTF-8 boundaries")
+    };
+    let row_at = |byte: usize| {
+        byte_starts
+            .partition_point(|start| *start <= byte)
+            .saturating_sub(1)
+    };
+    let mut style = Style::default();
+    let mut styles = Vec::new();
+    let mut lists = Vec::<Option<u64>>::new();
+    let append = |document: &mut RenderedMarkdown,
+                  row: usize,
+                  text: String,
+                  style: Style,
+                  source_start: usize,
+                  source_end: usize,
+                  exact: bool| {
+        if text.is_empty() {
+            return;
+        }
+        document.lines[row].spans.push(Span::styled(text, style));
+        document.runs[row].push(SourceRun {
+            source_start,
+            source_end,
+            exact,
+        });
+    };
+    for (event, range) in Parser::new_ext(source, Options::all()).into_offset_iter() {
+        let row = row_at(range.start);
         match event {
-            Event::Start(Tag::Heading { level, .. }) => {
-                style = heading_style(level);
-            }
-            Event::End(TagEnd::Heading(_)) => {
-                finish(&mut lines, &mut current);
-                lines.push(Line::default());
-                style = Style::default();
-            }
-            Event::Start(Tag::Paragraph) => {}
-            Event::End(TagEnd::Paragraph) => {
-                finish(&mut lines, &mut current);
-                lines.push(Line::default());
-            }
-            Event::Start(Tag::List(_)) => list_depth += 1,
-            Event::End(TagEnd::List(_)) => {
-                list_depth = list_depth.saturating_sub(1);
-                if list_depth == 0 {
-                    lines.push(Line::default());
+            Event::Start(tag) => {
+                styles.push(style);
+                match tag {
+                    Tag::Heading { level, .. } => style = heading_style(level),
+                    Tag::Emphasis => style = style.add_modifier(Modifier::ITALIC),
+                    Tag::Strong => style = style.add_modifier(Modifier::BOLD),
+                    Tag::Strikethrough => style = style.add_modifier(Modifier::CROSSED_OUT),
+                    Tag::Link { .. } => {
+                        style = style.fg(theme::BLUE).add_modifier(Modifier::UNDERLINED)
+                    }
+                    Tag::CodeBlock(_) => {
+                        style = Style::default().fg(theme::GREEN).bg(theme::SURFACE0)
+                    }
+                    Tag::List(start) => lists.push(start),
+                    Tag::Item => {
+                        let indent = "  ".repeat(lists.len().saturating_sub(1));
+                        let bullet = match lists.last_mut() {
+                            Some(Some(number)) => {
+                                let label = format!("{number}. ");
+                                *number += 1;
+                                label
+                            }
+                            _ => "• ".into(),
+                        };
+                        let start = char_offset(range.start);
+                        append(
+                            &mut document,
+                            row,
+                            format!("{indent}{bullet}"),
+                            style,
+                            start,
+                            start,
+                            false,
+                        );
+                    }
+                    Tag::BlockQuote(_) => {
+                        let start = char_offset(range.start);
+                        append(
+                            &mut document,
+                            row,
+                            "│ ".into(),
+                            Style::default().fg(theme::OVERLAY0),
+                            start,
+                            start,
+                            false,
+                        );
+                    }
+                    _ => {}
                 }
             }
-            Event::Start(Tag::Item) => current.push(Span::raw(format!(
-                "{}• ",
-                "  ".repeat(list_depth.saturating_sub(1))
-            ))),
-            Event::End(TagEnd::Item) => finish(&mut lines, &mut current),
-            Event::Start(Tag::BlockQuote(_)) => {
-                current.push(Span::styled("│ ", Style::default().fg(theme::OVERLAY0)))
+            Event::End(tag) => {
+                if matches!(tag, TagEnd::List(_)) {
+                    lists.pop();
+                }
+                if matches!(tag, TagEnd::TableCell) {
+                    let end = char_offset(range.end);
+                    append(
+                        &mut document,
+                        row,
+                        " │ ".into(),
+                        Style::default().fg(theme::OVERLAY0),
+                        end,
+                        end,
+                        false,
+                    );
+                }
+                style = styles.pop().unwrap_or_default();
             }
-            Event::End(TagEnd::BlockQuote(_)) => {
-                finish(&mut lines, &mut current);
-                lines.push(Line::default());
+            Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
+                let exact = text.as_ref() == &source[range.clone()];
+                let mut byte = range.start;
+                for (line_offset, part) in text.split_inclusive('\n').enumerate() {
+                    let row = if exact {
+                        row_at(byte)
+                    } else {
+                        (row + line_offset).min(byte_starts.len() - 1)
+                    };
+                    if !exact && line_offset > 0 {
+                        byte = byte_starts[row];
+                    }
+                    let content = part.trim_end_matches(['\r', '\n']);
+                    let end = if exact {
+                        byte + content.len()
+                    } else {
+                        range
+                            .end
+                            .min(byte_starts.get(row + 1).copied().unwrap_or(source.len()))
+                    };
+                    append(
+                        &mut document,
+                        row,
+                        content.into(),
+                        style,
+                        char_offset(byte),
+                        char_offset(end),
+                        exact,
+                    );
+                    if exact {
+                        byte += part.len();
+                    }
+                }
             }
-            Event::Start(Tag::Emphasis) => style = style.add_modifier(Modifier::ITALIC),
-            Event::End(TagEnd::Emphasis) => style = style.remove_modifier(Modifier::ITALIC),
-            Event::Start(Tag::Strong) => style = style.add_modifier(Modifier::BOLD),
-            Event::End(TagEnd::Strong) => style = style.remove_modifier(Modifier::BOLD),
-            Event::Start(Tag::CodeBlock(_)) => {
-                style = Style::default().fg(theme::GREEN).bg(theme::SURFACE0)
+            Event::Code(text) => {
+                let original = &source[range.clone()];
+                let found = original.find(text.as_ref());
+                let start = range.start + found.unwrap_or(0);
+                let end = if found.is_some() {
+                    start + text.len()
+                } else {
+                    range.end
+                };
+                append(
+                    &mut document,
+                    row,
+                    text.into_string(),
+                    Style::default().fg(theme::PEACH).bg(theme::SURFACE0),
+                    char_offset(start),
+                    char_offset(end),
+                    found.is_some(),
+                );
             }
-            Event::End(TagEnd::CodeBlock) => {
-                finish(&mut lines, &mut current);
-                lines.push(Line::default());
-                style = Style::default();
-            }
-            Event::Text(text) => current.push(Span::styled(text.into_string(), style)),
-            Event::Code(text) => current.push(Span::styled(
-                text.into_string(),
-                Style::default().fg(theme::PEACH).bg(theme::SURFACE0),
-            )),
-            Event::SoftBreak | Event::HardBreak => finish(&mut lines, &mut current),
             Event::Rule => {
-                finish(&mut lines, &mut current);
-                lines.push(Line::styled(
+                append(
+                    &mut document,
+                    row,
                     "─".repeat(40),
                     Style::default().fg(theme::OVERLAY0),
-                ));
+                    char_offset(range.start),
+                    char_offset(range.end),
+                    false,
+                );
             }
             Event::TaskListMarker(done) => {
-                let rendered_column = current
-                    .iter()
-                    .map(|span| unicode_width::UnicodeWidthStr::width(span.content.as_ref()))
-                    .sum();
-                if let Some(relative_marker) =
-                    source[source_range.clone()]
-                        .char_indices()
-                        .find_map(|(index, character)| {
-                            matches!(character, ' ' | 'x' | 'X').then_some(index)
-                        })
-                {
-                    tasks.push(TaskMarker {
-                        rendered_line: lines.len(),
-                        rendered_column,
-                        source_marker_char: source[..source_range.start + relative_marker]
-                            .chars()
-                            .count(),
+                if let Some(marker) = source[range.clone()].find([' ', 'x', 'X']) {
+                    document.tasks.push(TaskMarker {
+                        rendered_line: row,
+                        rendered_column: document.lines[row].width(),
+                        source_marker_char: char_offset(range.start + marker),
                         checked: done,
                     });
                 }
-                current.push(Span::raw(if done { "[x] " } else { "[ ] " }))
+                append(
+                    &mut document,
+                    row,
+                    if done { "[x] ".into() } else { "[ ] ".into() },
+                    style,
+                    char_offset(range.start),
+                    char_offset(range.end),
+                    false,
+                );
             }
-            Event::Html(html) | Event::InlineHtml(html) => current.push(Span::styled(
-                html.into_string(),
-                Style::default().fg(theme::OVERLAY0),
-            )),
             _ => {}
         }
     }
-    if !current.is_empty() {
-        finish(&mut lines, &mut current);
-    }
-    if lines.is_empty() {
-        lines.push(Line::default());
-    }
-    RenderedMarkdown { lines, tasks }
+    document
 }
 
 fn heading_style(level: HeadingLevel) -> Style {
@@ -169,5 +331,83 @@ mod tests {
         );
         assert!(!document.tasks[0].checked);
         assert!(document.tasks[1].checked);
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct MarkdownCache {
+    document: Option<(u64, u64, std::rc::Rc<RenderedMarkdown>)>,
+}
+impl MarkdownCache {
+    pub fn get(&mut self, buffer: &crate::buffer::Buffer) -> std::rc::Rc<RenderedMarkdown> {
+        if let Some((id, revision, document)) = &self.document {
+            if *id == buffer.id() && *revision == buffer.revision() {
+                return std::rc::Rc::clone(document);
+            }
+        }
+        let document = std::rc::Rc::new(render_document(&buffer.text()));
+        self.document = Some((
+            buffer.id(),
+            buffer.revision(),
+            std::rc::Rc::clone(&document),
+        ));
+        document
+    }
+}
+
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+    #[test]
+    fn source_rows_and_clicks_preserve_inline_unicode_and_fenced_code() {
+        let source =
+            "# Heading\n\n**🌍 bold** and `code`\n\n```rust\nlet a = 1;\nlet b = 2;\n```\n";
+        let document = render_document(source);
+        assert_eq!(document.lines.len(), source.split('\n').count());
+        assert_eq!(document.lines[2].to_string(), "🌍 bold and code");
+        assert_eq!(document.source_column(2, 0), 2);
+        assert_eq!(document.source_column(2, 2), 3);
+        assert_eq!(document.lines[5].to_string(), "let a = 1;");
+        assert_eq!(document.lines[6].to_string(), "let b = 2;");
+    }
+    #[test]
+    fn nested_styles_restore_heading_and_outer_emphasis() {
+        let document = render_document("# title **bold** after\n");
+        assert!(document.lines[0]
+            .spans
+            .last()
+            .unwrap()
+            .style
+            .add_modifier
+            .contains(Modifier::BOLD));
+    }
+    #[test]
+    fn navigation_reuses_cached_markdown_and_edits_invalidate_it() {
+        let mut buffer = crate::buffer::Buffer::empty();
+        buffer.insert("# title\n");
+        let mut cache = MarkdownCache::default();
+        let first = cache.get(&buffer);
+        buffer.move_horizontal(-1, false);
+        assert!(std::rc::Rc::ptr_eq(&first, &cache.get(&buffer)));
+        buffer.insert("new");
+        assert!(!std::rc::Rc::ptr_eq(&first, &cache.get(&buffer)));
+    }
+}
+
+#[cfg(test)]
+mod active_line_tests {
+    use super::*;
+    #[test]
+    fn active_source_text_keeps_live_heading_and_emphasis_styles() {
+        let document = render_document("# Title\n**bold**\n");
+        assert_eq!(document.source_style(0, 0).fg, Some(theme::SUBTEXT0));
+        assert!(document
+            .source_style(0, 2)
+            .add_modifier
+            .contains(Modifier::BOLD));
+        assert!(document
+            .source_style(1, 10)
+            .add_modifier
+            .contains(Modifier::BOLD));
     }
 }

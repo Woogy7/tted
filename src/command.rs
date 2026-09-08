@@ -144,7 +144,7 @@ impl Command {
             Self::FindReplace => "Editor: Find and Replace",
             Self::NextTab => "Tab: Next",
             Self::PreviousTab => "Tab: Previous",
-            Self::ToggleMarkdownReader => "Markdown: Toggle Reader",
+            Self::ToggleMarkdownReader => "Markdown: Toggle Live Preview",
             Self::GitStatus => "Git: Open Status",
             Self::GitCurrentFileDiff => "Git: Open Current File Diff",
             Self::GitWorkspaceDiff => "Git: Open Workspace Diff",

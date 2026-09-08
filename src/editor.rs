@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::HashMap,
     fs,
     io::{self, Write},
@@ -98,6 +99,7 @@ pub struct Editor {
     tab_close_hits: Vec<(u16, u16, usize)>,
     tab_start: usize,
     markdown_reading: Vec<bool>,
+    markdown_cache: RefCell<crate::markdown::MarkdownCache>,
     clipboard: Option<String>,
     search: Option<SearchState>,
     quick_open: Option<QuickOpen>,
@@ -181,6 +183,7 @@ impl Editor {
             tab_close_hits: Vec::new(),
             tab_start: 0,
             markdown_reading,
+            markdown_cache: RefCell::new(crate::markdown::MarkdownCache::default()),
             clipboard: None,
             search: None,
             quick_open: None,
@@ -481,27 +484,29 @@ impl Editor {
                 }
                 MouseEventKind::Down(MouseButton::Left)
                 | MouseEventKind::Drag(MouseButton::Left)
-                    if !self.markdown_reading[self.active]
-                        && self.body.contains((mouse.column, mouse.row).into()) =>
+                    if self.body.contains((mouse.column, mouse.row).into()) =>
                 {
                     self.explorer.set_focused(false);
-                    let line = self.top_line + usize::from(mouse.row - self.body.y);
+                    let line = (self.top_line + usize::from(mouse.row - self.body.y))
+                        .min(self.current().len_lines() - 1);
                     let col = self.left_col
                         + usize::from(mouse.column.saturating_sub(self.body.x + self.gutter_width));
-                    let select = matches!(mouse.kind, MouseEventKind::Drag(_));
-                    self.current_mut()
-                        .set_cursor_line_screen_col(line, col, select);
-                    self.ensure_visible();
-                }
-                MouseEventKind::Down(MouseButton::Left)
+                    let select = matches!(mouse.kind, MouseEventKind::Drag(_))
+                        || mouse.modifiers.contains(KeyModifiers::SHIFT);
                     if self.markdown_reading[self.active]
-                        && self.body.contains((mouse.column, mouse.row).into()) =>
-                {
-                    self.explorer.set_focused(false);
-                    let rendered_line =
-                        self.top_line + usize::from(mouse.row.saturating_sub(self.body.y));
-                    let rendered_column = usize::from(mouse.column.saturating_sub(self.body.x));
-                    self.toggle_markdown_task(rendered_line, rendered_column);
+                        && !select
+                        && self.toggle_markdown_task(line, col)
+                    {
+                        return Ok(false);
+                    }
+                    if self.markdown_reading[self.active] && !self.markdown_line_is_raw(line) {
+                        let column = self.markdown_document().source_column(line, col);
+                        self.current_mut().set_cursor_line_col(line, column, select);
+                    } else {
+                        self.current_mut()
+                            .set_cursor_line_screen_col(line, col, select);
+                    }
+                    self.ensure_visible();
                 }
                 MouseEventKind::ScrollUp => self.top_line = self.top_line.saturating_sub(3),
                 MouseEventKind::ScrollDown => {
@@ -776,25 +781,6 @@ impl Editor {
                     return self.execute_command(Command::PreviousTab);
                 }
                 _ => {}
-            }
-            return Ok(false);
-        }
-        if self.markdown_reading[self.active] {
-            let page = usize::from(self.body.height.max(1));
-            let max_top = self.markdown_max_top();
-            match key.code {
-                KeyCode::Up => self.top_line = self.top_line.saturating_sub(1),
-                KeyCode::Down => self.top_line = self.top_line.saturating_add(1).min(max_top),
-                KeyCode::PageUp => self.top_line = self.top_line.saturating_sub(page),
-                KeyCode::PageDown => {
-                    self.top_line = self.top_line.saturating_add(page).min(max_top)
-                }
-                KeyCode::Home => self.top_line = 0,
-                KeyCode::End => self.top_line = max_top,
-                _ => {
-                    self.message =
-                        "Reading view is read-only; Ctrl+Shift+M returns to source".into()
-                }
             }
             return Ok(false);
         }
@@ -1231,8 +1217,6 @@ impl Editor {
             Command::FindReplace => {
                 if self.current().is_read_only() {
                     self.message = "Find and Replace is unavailable in read-only Git views".into();
-                } else if self.markdown_reading[self.active] {
-                    self.message = "Return to Markdown source before searching".into();
                 } else {
                     self.search = Some(SearchState {
                         query: String::new(),
@@ -1264,15 +1248,16 @@ impl Editor {
                     })
                 {
                     self.markdown_reading[self.active] = !self.markdown_reading[self.active];
-                    self.top_line = 0;
+                    self.gutter_width = 0;
+                    self.ensure_visible();
                     self.message = if self.markdown_reading[self.active] {
-                        "Markdown reading view"
+                        "Markdown live preview — edit the active line"
                     } else {
                         "Markdown source view"
                     }
                     .into();
                 } else {
-                    self.message = "Markdown reading view is available for .md files".into();
+                    self.message = "Markdown live preview is available for .md files".into();
                 }
             }
             Command::GitStatus => {
@@ -2268,45 +2253,112 @@ impl Editor {
         }
     }
 
-    fn markdown_max_top(&self) -> usize {
-        crate::markdown::render(&self.current().text())
-            .len()
-            .saturating_sub(usize::from(self.body.height.max(1)))
+    fn markdown_document(&self) -> std::rc::Rc<crate::markdown::RenderedMarkdown> {
+        self.markdown_cache.borrow_mut().get(self.current())
     }
 
-    fn toggle_markdown_task(&mut self, rendered_line: usize, rendered_column: usize) {
-        if self.current().is_read_only() {
-            self.message = "This Markdown view is read-only".into();
-            return;
+    fn markdown_max_top(&self) -> usize {
+        self.document_max_top()
+    }
+
+    fn markdown_line_is_raw(&self, line: usize) -> bool {
+        if line == self.current().cursor_line_col().0 {
+            return true;
         }
-        let document = crate::markdown::render_document(&self.current().text());
-        let Some(task) = document.tasks.into_iter().find(|task| {
+        let Some((a, b)) = self.current().selection() else {
+            return false;
+        };
+        let start = self.current().line_start_char(line);
+        let end = if line + 1 < self.current().len_lines() {
+            self.current().line_start_char(line + 1)
+        } else {
+            self.current().len_chars()
+        };
+        a < end && b > start
+    }
+
+    fn toggle_markdown_task(&mut self, rendered_line: usize, rendered_column: usize) -> bool {
+        if self.current().is_read_only() {
+            return false;
+        }
+        let document = self.markdown_document();
+        let Some(task) = document.tasks.iter().find(|task| {
+            if task.rendered_line != rendered_line {
+                return false;
+            }
+            let column = if self.markdown_line_is_raw(task.rendered_line) {
+                let start = self.current().line_start_char(task.rendered_line);
+                let prefix = self
+                    .current()
+                    .line(task.rendered_line)
+                    .chars()
+                    .take(task.source_marker_char.saturating_sub(start + 1))
+                    .collect::<String>();
+                UnicodeWidthStr::width(prefix.as_str())
+            } else {
+                task.rendered_column
+            };
             task.rendered_line == rendered_line
-                && rendered_column >= task.rendered_column
-                && rendered_column < task.rendered_column + 3
+                && rendered_column >= column
+                && rendered_column < column + 3
         }) else {
-            return;
+            return false;
         };
         let revision = self.current().revision();
-        let replacement = if task.checked { " " } else { "x" };
+        let checked = task.checked;
         if self
             .current_mut()
             .replace_range(
                 revision,
                 task.source_marker_char,
                 task.source_marker_char + 1,
-                replacement,
+                if checked { " " } else { "x" },
             )
             .is_ok()
         {
             self.changed();
-            self.message = if task.checked {
+            self.message = if checked {
                 "Markdown task unchecked"
             } else {
                 "Markdown task checked"
             }
             .into();
+            return true;
         }
+        false
+    }
+
+    fn markdown_visible_lines(&self) -> Vec<Line<'static>> {
+        let document = self.markdown_document();
+        let end = (self.top_line + usize::from(self.body.height)).min(self.current().len_lines());
+        (self.top_line..end)
+            .map(|row| {
+                if !self.markdown_line_is_raw(row) {
+                    return document.lines[row].clone();
+                }
+                let text = self.current().line(row);
+                let mut offset = self.current().line_start_char(row);
+                let mut column = 0;
+                let selection = self.current().selection();
+                let mut spans = Vec::new();
+                for grapheme in text.trim_end_matches(['\r', '\n']).graphemes(true) {
+                    if column >= self.left_col + usize::from(self.body.width) {
+                        break;
+                    }
+                    let next = offset + grapheme.chars().count();
+                    let source_style = document.source_style(row, offset);
+                    let style = if selection.is_some_and(|(a, b)| offset < b && next > a) {
+                        source_style.bg(theme::SURFACE1).fg(theme::TEXT)
+                    } else {
+                        source_style
+                    };
+                    spans.push(Span::styled(grapheme.to_owned(), style));
+                    column += UnicodeWidthStr::width(grapheme);
+                    offset = next;
+                }
+                Line::from(spans)
+            })
+            .collect()
     }
 
     fn document_max_top(&self) -> usize {
@@ -2408,25 +2460,33 @@ impl Editor {
         }
 
         if self.markdown_reading[self.active] {
-            let rendered = crate::markdown::render(&self.current().text());
-            self.top_line = self.top_line.min(
-                rendered
-                    .len()
-                    .saturating_sub(usize::from(self.body.height.max(1))),
-            );
-            let visible = rendered
-                .into_iter()
-                .skip(self.top_line)
-                .take(usize::from(self.body.height))
-                .collect::<Vec<_>>();
+            self.top_line = self.top_line.min(self.markdown_max_top());
             frame.render_widget(
-                Paragraph::new(visible).style(Style::default().bg(theme::BASE).fg(theme::TEXT)),
+                Paragraph::new(self.markdown_visible_lines())
+                    .scroll((0, self.left_col.min(u16::MAX as usize) as u16))
+                    .style(Style::default().bg(theme::BASE).fg(theme::TEXT)),
                 self.body,
             );
+            let (line, _) = self.current().cursor_line_col();
+            if !self.help_visible
+                && line >= self.top_line
+                && line < self.top_line + usize::from(self.body.height)
+                && self.body.width > 0
+            {
+                let column = self
+                    .current()
+                    .cursor_screen_col()
+                    .saturating_sub(self.left_col)
+                    .min(usize::from(self.body.width - 1));
+                frame.set_cursor_position((
+                    self.body.x + column as u16,
+                    self.body.y + (line - self.top_line) as u16,
+                ));
+            }
             self.render_secondary_pane(frame);
             let status = self.modal_prompt_text().unwrap_or_else(|| {
                 format!(
-                    "{}   Markdown reading view   F1 help   Ctrl+Shift+M source",
+                    "{}   Markdown live preview   F6 source   Ctrl+S save",
                     self.current().name()
                 )
             });
@@ -2674,7 +2734,7 @@ impl Editor {
             "  Ctrl+E                                Toggle/focus file explorer",
             "  Explorer: arrows, Enter, Esc/Tab      Navigate/open/return",
             "  Explorer: N / Shift+N / R / D         New file/dir, rename/delete",
-            "  Ctrl+Shift+M / F6                     Markdown reading view",
+            "  Ctrl+Shift+M / F6                     Markdown live preview",
             "  F11                                   Toggle Focus Mode",
             "  Ctrl+Q                                Quit",
             "",
@@ -3748,7 +3808,8 @@ mod input_tests {
             .key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             .unwrap();
         terminal.draw(|frame| editor.render(frame)).unwrap();
-        assert_eq!(editor.top_line, 1);
+        assert_eq!(editor.current().cursor_line_col().0, 1);
+        assert_eq!(editor.top_line, 0);
 
         editor
             .handle_event(Event::Mouse(MouseEvent {
@@ -3759,7 +3820,8 @@ mod input_tests {
             }))
             .unwrap();
         terminal.draw(|frame| editor.render(frame)).unwrap();
-        assert_eq!(editor.top_line, 4);
+        assert_eq!(editor.top_line, 3);
+        assert_eq!(editor.current().cursor_line_col().0, 1);
     }
 
     #[test]
@@ -3944,5 +4006,94 @@ mod safety_tests {
             .unwrap();
         assert_eq!(fs::read_to_string(path).unwrap(), "replacement");
         assert!(!editor.current().is_dirty());
+    }
+}
+
+#[cfg(test)]
+mod live_markdown_tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+    #[test]
+    fn shift_home_selects_and_replaces_a_line_in_source_and_preview() {
+        for preview in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("notes.md");
+            fs::write(&path, "# A Unicode 🌍 heading\n\nother\n").unwrap();
+            let mut editor = Editor::new(vec![path]);
+            editor.markdown_reading[0] = preview;
+            editor
+                .key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))
+                .unwrap();
+            editor
+                .key(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT))
+                .unwrap();
+            assert_eq!(
+                editor.current().selected_text().as_deref(),
+                Some("# A Unicode 🌍 heading")
+            );
+            editor
+                .handle_event(Event::Paste("replacement".into()))
+                .unwrap();
+            assert_eq!(editor.current().text(), "replacement\n\nother\n");
+            editor
+                .key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL))
+                .unwrap();
+            assert_eq!(editor.current().text(), "# A Unicode 🌍 heading\n\nother\n");
+        }
+    }
+    #[test]
+    fn preview_reveals_only_active_or_selected_source_lines() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("notes.md");
+        fs::write(&path, "# Heading\n\n**bold** and text\n").unwrap();
+        let mut editor = Editor::new(vec![path]);
+        editor.markdown_reading[0] = true;
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal.draw(|frame| editor.render(frame)).unwrap();
+        let rows = editor.markdown_visible_lines();
+        assert_eq!(rows[0].to_string(), "# Heading");
+        assert_eq!(rows[2].to_string(), "bold and text");
+        editor
+            .handle_event(Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: editor.body.x + 2,
+                row: editor.body.y + 2,
+                modifiers: KeyModifiers::NONE,
+            }))
+            .unwrap();
+        assert_eq!(editor.current().cursor_line_col(), (2, 4));
+        let rows = editor.markdown_visible_lines();
+        assert_eq!(rows[0].to_string(), "Heading");
+        assert_eq!(rows[2].to_string(), "**bold** and text");
+        editor
+            .key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(editor.current().line(2), "**boXld** and text\n");
+    }
+    #[test]
+    fn multiline_paste_and_search_work_in_preview_without_switching_modes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("notes.md");
+        fs::write(&path, "# Heading\n").unwrap();
+        let mut editor = Editor::new(vec![path]);
+        editor.markdown_reading[0] = true;
+        editor
+            .key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE))
+            .unwrap();
+        editor
+            .handle_event(Event::Paste("\n\n- [ ] task\n**bold**".into()))
+            .unwrap();
+        assert!(editor.markdown_reading[0]);
+        assert_eq!(
+            editor.markdown_document().lines.len(),
+            editor.current().len_lines()
+        );
+        editor.execute_command(Command::FindReplace).unwrap();
+        assert!(editor.search.is_some());
+        editor.search = None;
+        editor
+            .key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(editor.current().text(), "# Heading\n");
     }
 }

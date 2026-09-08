@@ -4,6 +4,11 @@ All notable changes are documented here.
 
 ## Unreleased
 
+- Edit Markdown directly in live preview: reveal active/selected source lines,
+  retain surrounding formatting, map clicks to source, and support normal editing
+  keys including Shift+Home/End. Cache parsed Markdown by buffer revision.
+- Request enhanced modified-key reporting from supporting terminals.
+
 - Remove the fixed 25 ms Git polling floor and avoid redraws for unchanged Git
   snapshots. Log aggregate input/render timings without recording keys or text.
 
