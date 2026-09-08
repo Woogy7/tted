@@ -4,6 +4,12 @@ All notable changes are documented here.
 
 ## Unreleased
 
+- Continue Markdown bullets, numbered lists, tasks, and quotes on Enter; exit
+  empty items, add continuation lines with Shift+Enter, and indent selected list
+  lines with Tab/Shift+Tab as one undoable edit.
+- Add remappable line-edge selection, Alt+Shift+Left/Right shortcuts, and an
+  explicit key inspector for terminal/multiplexer troubleshooting.
+
 - Edit Markdown directly in live preview: reveal active/selected source lines,
   retain surrounding formatting, map clicks to source, and support normal editing
   keys including Shift+Home/End. Cache parsed Markdown by buffer revision.

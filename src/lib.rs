@@ -13,3 +13,5 @@ pub mod quick_open;
 pub mod service;
 mod syntax;
 pub mod theme;
+
+pub(crate) mod markdown_edit;

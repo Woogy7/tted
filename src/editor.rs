@@ -101,6 +101,7 @@ pub struct Editor {
     markdown_reading: Vec<bool>,
     markdown_cache: RefCell<crate::markdown::MarkdownCache>,
     clipboard: Option<String>,
+    inspect_next_key: bool,
     search: Option<SearchState>,
     quick_open: Option<QuickOpen>,
     command_palette: Option<CommandPalette>,
@@ -185,6 +186,7 @@ impl Editor {
             markdown_reading,
             markdown_cache: RefCell::new(crate::markdown::MarkdownCache::default()),
             clipboard: None,
+            inspect_next_key: false,
             search: None,
             quick_open: None,
             command_palette: None,
@@ -525,6 +527,21 @@ impl Editor {
     }
 
     fn key(&mut self, mut key: KeyEvent) -> Result<bool> {
+        if self.inspect_next_key {
+            self.inspect_next_key = false;
+            if key.code == KeyCode::Esc {
+                self.message = "Key inspection cancelled".into();
+                return Ok(false);
+            }
+            let name = if matches!(key.code, KeyCode::Char(_)) {
+                format!("character (redacted), modifiers={:?}", key.modifiers)
+            } else {
+                format!("{} ({:?})", key_event_name(&key), key.modifiers)
+            };
+            self.message = format!("Received {name}");
+            crate::diagnostics::log(&format!("key inspector: {name}"));
+            return Ok(false);
+        }
         if let KeyCode::Char(control) = key.code {
             if let Some(letter) = control_letter(control) {
                 key.code = KeyCode::Char(letter);
@@ -648,6 +665,13 @@ impl Editor {
             || (ctrl && shift && matches!(key.code, KeyCode::Char('m') | KeyCode::Char('M')))
         {
             return self.execute_command(Command::ToggleMarkdownReader);
+        }
+        if alt && shift && matches!(key.code, KeyCode::Left | KeyCode::Right) {
+            return self.execute_command(if key.code == KeyCode::Right {
+                Command::SelectLineEnd
+            } else {
+                Command::SelectLineStart
+            });
         }
         if alt && matches!(key.code, KeyCode::Left | KeyCode::Right) {
             return self.execute_command(if key.code == KeyCode::Right {
@@ -814,6 +838,14 @@ impl Editor {
                 self.changed();
             }
             KeyCode::Enter => {
+                if self.is_markdown()
+                    && !self.markdown_document().code_rows[self.current().cursor_line_col().0]
+                    && crate::markdown_edit::newline(self.current_mut(), shift)
+                {
+                    self.changed();
+                    self.ensure_visible();
+                    return Ok(false);
+                }
                 let prefix = self.current().current_line_prefix();
                 let indent = prefix
                     .chars()
@@ -844,6 +876,12 @@ impl Editor {
                 }
                 self.changed();
             }
+            KeyCode::Tab if self.markdown_list_at_cursor() => {
+                let width = self.config.editor.tab_width.max(1);
+                let unit = self.indentation_unit();
+                self.current_mut().indent_lines(&unit, shift, width);
+                self.changed();
+            }
             KeyCode::Tab => {
                 let width = self.config.editor.tab_width.max(1);
                 let insertion = if self.config.editor.use_spaces {
@@ -853,6 +891,12 @@ impl Editor {
                     "\t".into()
                 };
                 self.current_mut().insert(&insertion);
+                self.changed();
+            }
+            KeyCode::BackTab if self.markdown_list_at_cursor() => {
+                let width = self.config.editor.tab_width.max(1);
+                let unit = self.indentation_unit();
+                self.current_mut().indent_lines(&unit, true, width);
                 self.changed();
             }
             KeyCode::BackTab => {
@@ -1214,6 +1258,17 @@ impl Editor {
                 }
             }
             Command::FocusMode => self.toggle_focus_mode(),
+            Command::InspectKey => {
+                self.inspect_next_key = true;
+                self.message =
+                    "Press the shortcut to inspect (Esc cancels); document will not change".into();
+            }
+            Command::SelectLineStart | Command::SelectLineEnd => {
+                self.explorer.set_focused(false);
+                self.current_mut()
+                    .move_line_edge(command == Command::SelectLineEnd, true);
+                self.ensure_visible();
+            }
             Command::FindReplace => {
                 if self.current().is_read_only() {
                     self.message = "Find and Replace is unavailable in read-only Git views".into();
@@ -2251,6 +2306,30 @@ impl Editor {
         } else if col >= self.left_col + width {
             self.left_col = col + 1 - width;
         }
+    }
+
+    fn is_markdown(&self) -> bool {
+        self.current()
+            .path()
+            .and_then(|path| path.extension())
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| {
+                ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown")
+            })
+    }
+
+    fn markdown_list_at_cursor(&self) -> bool {
+        if !self.is_markdown() {
+            return false;
+        }
+        let row = self
+            .current()
+            .selection()
+            .map_or(self.current().cursor_line_col().0, |(start, _)| {
+                self.current().rope().char_to_line(start)
+            });
+        !self.markdown_document().fenced_rows[row]
+            && crate::markdown_edit::is_list(&self.current().line(row))
     }
 
     fn markdown_document(&self) -> std::rc::Rc<crate::markdown::RenderedMarkdown> {
@@ -4095,5 +4174,75 @@ mod live_markdown_tests {
             .key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL))
             .unwrap();
         assert_eq!(editor.current().text(), "# Heading\n");
+    }
+}
+
+#[cfg(test)]
+mod markdown_list_input_tests {
+    use super::*;
+    #[test]
+    fn list_enter_and_indentation_work_in_both_modes_and_preserve_undo() {
+        for preview in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("lists.md");
+            fs::write(&path, "- 🌍 first\n- second\n").unwrap();
+            let mut editor = Editor::new(vec![path]);
+            editor.markdown_reading[0] = preview;
+            editor.current_mut().move_line_edge(true, false);
+            editor.key(KeyEvent::from(KeyCode::Enter)).unwrap();
+            assert_eq!(editor.current().text(), "- 🌍 first\n- \n- second\n");
+            editor.key(KeyEvent::from(KeyCode::Tab)).unwrap();
+            assert_eq!(editor.current().line(1), "    - \n");
+            assert_eq!(editor.current().cursor_line_col(), (1, 6));
+            editor.key(KeyEvent::from(KeyCode::BackTab)).unwrap();
+            assert_eq!(editor.current().line(1), "- \n");
+            editor.current_mut().undo();
+            assert_eq!(editor.current().line(1), "    - \n");
+            editor.current_mut().undo();
+            editor.current_mut().undo();
+            assert_eq!(editor.current().text(), "- 🌍 first\n- second\n");
+            editor.current_mut().set_cursor_line_col(0, 0, false);
+            editor.current_mut().set_cursor_line_col(2, 0, true);
+            editor.key(KeyEvent::from(KeyCode::Tab)).unwrap();
+            assert_eq!(editor.current().text(), "    - 🌍 first\n    - second\n");
+            assert!(editor.current().selection().is_some());
+            editor.key(KeyEvent::from(KeyCode::BackTab)).unwrap();
+            assert_eq!(editor.current().text(), "- 🌍 first\n- second\n");
+        }
+    }
+    #[test]
+    fn code_blocks_do_not_continue_bullets() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("code.md");
+        fs::write(&path, "```\n- literal\n```\n").unwrap();
+        let mut editor = Editor::new(vec![path]);
+        editor.current_mut().set_cursor_line_col(1, 9, false);
+        editor.key(KeyEvent::from(KeyCode::Enter)).unwrap();
+        assert_eq!(editor.current().text(), "```\n- literal\n\n```\n");
+    }
+    #[test]
+    fn portable_line_selection_and_inspector_do_not_edit_text() {
+        let mut editor = Editor::new(Vec::new());
+        editor.current_mut().insert("hello 🌍");
+        editor
+            .key(KeyEvent::new(
+                KeyCode::Left,
+                KeyModifiers::ALT | KeyModifiers::SHIFT,
+            ))
+            .unwrap();
+        assert_eq!(
+            editor.current().selected_text().as_deref(),
+            Some("hello 🌍")
+        );
+        editor.execute_command(Command::InspectKey).unwrap();
+        editor
+            .key(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT))
+            .unwrap();
+        assert!(editor.message.contains("shift+home"));
+        assert_eq!(editor.current().text(), "hello 🌍");
+        editor.execute_command(Command::InspectKey).unwrap();
+        editor.key(KeyEvent::from(KeyCode::Char('Q'))).unwrap();
+        assert!(editor.message.contains("redacted"));
+        assert!(!editor.message.contains('Q'));
     }
 }

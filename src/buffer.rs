@@ -605,6 +605,67 @@ impl Buffer {
         }
     }
 
+    /// Indent whole selected lines as one undoable edit, retaining selection direction.
+    pub fn indent_lines(&mut self, unit: &str, unindent: bool, width: usize) {
+        if self.read_only {
+            return;
+        }
+        let (first, last) = self.selection().map_or_else(
+            || {
+                let row = self.cursor_line_col().0;
+                (row, row)
+            },
+            |(a, b)| {
+                (
+                    self.text.char_to_line(a),
+                    self.text.char_to_line(b.saturating_sub(1)),
+                )
+            },
+        );
+        let mut edits = Vec::new();
+        for row in first..=last {
+            let start = self.text.line_to_char(row);
+            let count = if unindent {
+                if self.text.get_char(start) == Some('\t') {
+                    1
+                } else {
+                    self.text
+                        .line(row)
+                        .chars()
+                        .take(width)
+                        .take_while(|c| *c == ' ')
+                        .count()
+                }
+            } else {
+                0
+            };
+            if !unindent || count > 0 {
+                edits.push((start, count));
+            }
+        }
+        if edits.is_empty() {
+            return;
+        }
+        self.checkpoint();
+        for (start, count) in edits.into_iter().rev() {
+            let inserted = if unindent { 0 } else { unit.chars().count() };
+            let map = |position: usize| {
+                if position < start {
+                    position
+                } else {
+                    position.saturating_sub(count).max(start) + inserted
+                }
+            };
+            self.text.remove(start..start + count);
+            if !unindent {
+                self.text.insert(start, unit);
+            }
+            self.cursor = map(self.cursor);
+            self.anchor = self.anchor.map(map);
+        }
+        self.finish_edit();
+    }
+
     pub fn unindent_current_line(&mut self, tab_width: usize) {
         let (line, _) = self.cursor_line_col();
         let start = self.text.line_to_char(line);

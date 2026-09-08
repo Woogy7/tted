@@ -8,6 +8,9 @@ pub enum Command {
     ToggleExplorer,
     FocusMode,
     FindReplace,
+    SelectLineStart,
+    SelectLineEnd,
+    InspectKey,
     NextTab,
     PreviousTab,
     ToggleMarkdownReader,
@@ -42,7 +45,7 @@ pub enum Command {
 }
 
 impl Command {
-    pub const ALL: [Self; 39] = [
+    pub const ALL: [Self; 42] = [
         Self::NewFile,
         Self::Save,
         Self::SaveAs,
@@ -51,6 +54,9 @@ impl Command {
         Self::ToggleExplorer,
         Self::FocusMode,
         Self::FindReplace,
+        Self::SelectLineStart,
+        Self::SelectLineEnd,
+        Self::InspectKey,
         Self::NextTab,
         Self::PreviousTab,
         Self::ToggleMarkdownReader,
@@ -94,6 +100,9 @@ impl Command {
             Self::ToggleExplorer => "workspace.toggle_explorer",
             Self::FocusMode => "view.focus_mode",
             Self::FindReplace => "editor.find_replace",
+            Self::SelectLineStart => "editor.select_line_start",
+            Self::SelectLineEnd => "editor.select_line_end",
+            Self::InspectKey => "help.inspect_key",
             Self::NextTab => "tab.next",
             Self::PreviousTab => "tab.previous",
             Self::ToggleMarkdownReader => "markdown.toggle_reader",
@@ -142,6 +151,9 @@ impl Command {
             Self::ToggleExplorer => "View: Toggle Explorer",
             Self::FocusMode => "View: Focus Mode",
             Self::FindReplace => "Editor: Find and Replace",
+            Self::SelectLineStart => "Editor: Select to Start of Line",
+            Self::SelectLineEnd => "Editor: Select to End of Line",
+            Self::InspectKey => "Help: Inspect Next Key",
             Self::NextTab => "Tab: Next",
             Self::PreviousTab => "Tab: Previous",
             Self::ToggleMarkdownReader => "Markdown: Toggle Live Preview",

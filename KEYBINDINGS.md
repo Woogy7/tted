@@ -40,3 +40,15 @@ Markdown live preview uses the normal editing keys, including Shift+Home/End,
 selection, paste, undo, and find/replace. The active and selected lines show their
 source syntax; other lines stay formatted. Mouse clicks position the caret in
 text or toggle task checkboxes.
+
+Markdown lists continue on Enter (including numbered lists and unchecked tasks).
+Enter on an empty item removes its marker. Shift+Enter adds a continuation line;
+Tab/Shift+Tab indent/unindent the current item or selected lines. Quotes continue
+on Enter too. Fenced code contents keep ordinary code-editor Enter behavior.
+
+Alt+Shift+Left/Right select to the start/end of the line. These actions are also
+available in F3 for remapping. To troubleshoot a terminal shortcut, open F2 and
+choose **Help: Inspect Next Key**, then press it. TTED displays and logs the
+received special key and modifiers without editing the document. Printable
+characters are redacted. If no event arrives, inspect terminal/multiplexer
+bindings; TTED cannot restore modifiers that were removed before delivery.

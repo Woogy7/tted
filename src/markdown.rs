@@ -25,6 +25,8 @@ pub struct RenderedMarkdown {
     pub lines: Vec<Line<'static>>,
     pub tasks: Vec<TaskMarker>,
     runs: Vec<Vec<SourceRun>>,
+    pub(crate) code_rows: Vec<bool>,
+    pub(crate) fenced_rows: Vec<bool>,
     line_starts: Vec<usize>,
 }
 
@@ -101,6 +103,8 @@ pub fn render_document(source: &str) -> RenderedMarkdown {
         lines: vec![Line::default(); byte_starts.len()],
         tasks: Vec::new(),
         runs: vec![Vec::new(); byte_starts.len()],
+        code_rows: vec![false; byte_starts.len()],
+        fenced_rows: vec![false; byte_starts.len()],
         line_starts: char_starts.clone(),
     };
     char_bytes.push(source.len());
@@ -147,7 +151,12 @@ pub fn render_document(source: &str) -> RenderedMarkdown {
                     Tag::Link { .. } => {
                         style = style.fg(theme::BLUE).add_modifier(Modifier::UNDERLINED)
                     }
-                    Tag::CodeBlock(_) => {
+                    Tag::CodeBlock(kind) => {
+                        let last = row_at(range.end.saturating_sub(1));
+                        document.code_rows[row..=last].fill(true);
+                        if matches!(kind, pulldown_cmark::CodeBlockKind::Fenced(_)) {
+                            document.fenced_rows[row..=last].fill(true);
+                        }
                         style = Style::default().fg(theme::GREEN).bg(theme::SURFACE0)
                     }
                     Tag::List(start) => lists.push(start),
