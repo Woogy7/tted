@@ -42,7 +42,8 @@ source syntax; other lines stay formatted. Mouse clicks position the caret in
 text or toggle task checkboxes.
 
 Markdown lists continue on Enter (including numbered lists and unchecked tasks).
-Enter on an empty item removes its marker. Shift+Enter adds a continuation line;
+Enter preserves manually typed empty markers; a second Enter on the untouched
+auto-inserted empty item exits. Shift+Enter adds a continuation line;
 Tab/Shift+Tab indent/unindent the current item or selected lines. Quotes continue
 on Enter too. Fenced code contents keep ordinary code-editor Enter behavior.
 
@@ -56,3 +57,5 @@ bindings; TTED cannot restore modifiers that were removed before delivery.
 In Markdown, type a backtick to pair inline code or wrap selected text. Type
 three backticks for a fence pair, optionally add a language, then press Enter.
 Typing a closing backtick already under the cursor moves past it.
+
+Live preview keeps both fences visible while the cursor is inside a code block.

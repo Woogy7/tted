@@ -57,7 +57,7 @@ context; even discarded unsaved edits can be recovered with Undo.
 
 ## Validation — 2026-09-08
 
-113 automated tests, formatting, Clippy with warnings denied, and the release
+115 automated tests, formatting, Clippy with warnings denied, and the release
 build pass. Real pseudo-terminal checks cover paste/save, permissions, external
 reload and undo, dirty conflicts, resize, and terminal restoration. A controlled
 language-server process verifies document open/close, stale-format rejection,

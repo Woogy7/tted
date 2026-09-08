@@ -4,6 +4,10 @@ All notable changes are documented here.
 
 ## Unreleased
 
+- Preserve manually typed empty list/quote markers on Enter; only an untouched
+  auto-inserted empty item exits on the next Enter. Keep fenced-code delimiters
+  visible while editing inside the block in live preview.
+
 - Add inline and fenced backtick completion, including selected-text wrapping,
   language-labelled fences, and typing past closing delimiters.
 - Ship a `te` launcher alongside `tted` in Cargo installs and release archives;

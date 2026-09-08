@@ -28,10 +28,21 @@ pub struct RenderedMarkdown {
     pub(crate) code_rows: Vec<bool>,
     pub(crate) fenced_rows: Vec<bool>,
     pub(crate) fence_starts: Vec<bool>,
+    fenced_blocks: Vec<(usize, usize)>,
     line_starts: Vec<usize>,
 }
 
 impl RenderedMarkdown {
+    pub(crate) fn same_fenced_block(&self, row: usize, cursor_row: usize) -> bool {
+        let count = self
+            .fenced_blocks
+            .partition_point(|(start, _)| *start <= cursor_row);
+        count.checked_sub(1).is_some_and(|index| {
+            let (start, end) = self.fenced_blocks[index];
+            cursor_row <= end && (start..=end).contains(&row)
+        })
+    }
+
     pub(crate) fn source_line_styles(&self, row: usize, length: usize) -> Vec<Style> {
         let mut styles = vec![Style::default().fg(theme::SUBTEXT0); length];
         let Some(line) = self.lines.get(row) else {
@@ -124,6 +135,7 @@ pub fn render_document(source: &str) -> RenderedMarkdown {
         code_rows: vec![false; byte_starts.len()],
         fenced_rows: vec![false; byte_starts.len()],
         fence_starts: vec![false; byte_starts.len()],
+        fenced_blocks: Vec::new(),
         line_starts: char_starts.clone(),
     };
     char_bytes.push(source.len());
@@ -176,6 +188,7 @@ pub fn render_document(source: &str) -> RenderedMarkdown {
                         if matches!(kind, pulldown_cmark::CodeBlockKind::Fenced(_)) {
                             document.fenced_rows[row..=last].fill(true);
                             document.fence_starts[row] = true;
+                            document.fenced_blocks.push((row, last));
                         }
                         style = Style::default().fg(theme::GREEN).bg(theme::SURFACE0)
                     }

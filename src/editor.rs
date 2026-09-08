@@ -102,6 +102,7 @@ pub struct Editor {
     markdown_cache: RefCell<crate::markdown::MarkdownCache>,
     clipboard: Option<String>,
     inspect_next_key: bool,
+    markdown_continuation: Option<(u64, u64, usize)>,
     search: Option<SearchState>,
     quick_open: Option<QuickOpen>,
     command_palette: Option<CommandPalette>,
@@ -187,6 +188,7 @@ impl Editor {
             markdown_cache: RefCell::new(crate::markdown::MarkdownCache::default()),
             clipboard: None,
             inspect_next_key: false,
+            markdown_continuation: None,
             search: None,
             quick_open: None,
             command_palette: None,
@@ -853,10 +855,25 @@ impl Editor {
                         return Ok(false);
                     }
                 }
+                let previous_row = self.current().cursor_line_col().0;
+                let exit_empty = self.markdown_continuation
+                    == Some((
+                        self.current().id(),
+                        self.current().revision(),
+                        self.current().cursor(),
+                    ));
                 if self.is_markdown()
-                    && !self.markdown_document().code_rows[self.current().cursor_line_col().0]
-                    && crate::markdown_edit::newline(self.current_mut(), shift)
+                    && !self.markdown_document().code_rows[previous_row]
+                    && crate::markdown_edit::newline(self.current_mut(), shift, exit_empty)
                 {
+                    self.markdown_continuation =
+                        (!shift && self.current().cursor_line_col().0 > previous_row).then(|| {
+                            (
+                                self.current().id(),
+                                self.current().revision(),
+                                self.current().cursor(),
+                            )
+                        });
                     self.changed();
                     self.ensure_visible();
                     return Ok(false);
@@ -2357,7 +2374,8 @@ impl Editor {
     }
 
     fn markdown_line_is_raw(&self, line: usize) -> bool {
-        if line == self.current().cursor_line_col().0 {
+        let cursor_row = self.current().cursor_line_col().0;
+        if line == cursor_row || self.markdown_document().same_fenced_block(line, cursor_row) {
             return true;
         }
         let Some((a, b)) = self.current().selection() else {
@@ -4297,5 +4315,60 @@ mod markdown_list_input_tests {
         editor.key(KeyEvent::from(KeyCode::Char('Q'))).unwrap();
         assert!(editor.message.contains("redacted"));
         assert!(!editor.message.contains('Q'));
+    }
+}
+
+#[cfg(test)]
+mod markdown_enter_regression_tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    #[test]
+    fn first_enter_preserves_a_manually_typed_empty_marker() {
+        for preview in [false, true] {
+            for (marker, next) in [("- ", "- "), ("1. ", "2. "), ("- [ ] ", "- [ ] ")] {
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("notes.md");
+                fs::write(&path, "").unwrap();
+                let mut editor = Editor::new(vec![path.clone()]);
+                editor.markdown_reading[0] = preview;
+                for c in marker.chars() {
+                    editor.key(KeyEvent::from(KeyCode::Char(c))).unwrap();
+                }
+                editor.key(KeyEvent::from(KeyCode::Enter)).unwrap();
+                assert_eq!(editor.current().text(), format!("{marker}\n{next}"));
+                editor.current_mut().save().unwrap();
+                assert_eq!(
+                    fs::read_to_string(&path).unwrap(),
+                    format!("{marker}\n{next}")
+                );
+                // A second Enter exits only the auto-inserted empty item.
+                editor.key(KeyEvent::from(KeyCode::Enter)).unwrap();
+                assert_eq!(editor.current().text(), format!("{marker}\n"));
+                editor.current_mut().undo();
+                assert_eq!(editor.current().text(), format!("{marker}\n{next}"));
+            }
+        }
+    }
+
+    #[test]
+    fn fence_delimiters_remain_visible_while_editing_the_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.md");
+        fs::write(&path, "").unwrap();
+        let mut editor = Editor::new(vec![path.clone()]);
+        editor.markdown_reading[0] = true;
+        for _ in 0..3 {
+            editor.key(KeyEvent::from(KeyCode::Char('`'))).unwrap();
+        }
+        editor.key(KeyEvent::from(KeyCode::Enter)).unwrap();
+        assert_eq!(editor.current().text(), "```\n\n```");
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal.draw(|frame| editor.render(frame)).unwrap();
+        let lines = editor.markdown_visible_lines();
+        assert_eq!(lines[0].to_string(), "```");
+        assert_eq!(lines[2].to_string(), "```");
+        editor.current_mut().save().unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), "```\n\n```");
     }
 }

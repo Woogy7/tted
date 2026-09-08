@@ -216,7 +216,8 @@ and previous matches, Tab switches fields, Alt+C toggles case sensitivity,
 Ctrl+R replaces the current match, and Ctrl+Shift+R replaces all matches.
 
 F6 toggles Markdown live preview. The active line shows its Markdown syntax
-while retaining live text styling; surrounding lines stay formatted. Type, select, paste, search, and undo as in
+while retaining live text styling; surrounding lines stay formatted. While editing
+a fenced code block, its opening and closing fences remain visible. Type, select, paste, search, and undo as in
 source mode. Click formatted text to place the cursor in its source line.
 Selected lines reveal their syntax so the exact selection stays visible.
 Shift+Home and Shift+End select to the start or end of the active line;
@@ -226,7 +227,8 @@ For terminal shortcut troubleshooting, use F2 → **Help: Inspect Next Key**.
 Markdown editing includes:
 
 - Enter continues bullets, numbered lists, tasks (unchecked), and quotes.
-- Enter on an empty item removes its marker to finish the list or quote.
+- Enter preserves a manually typed empty marker and continues the list or quote.
+  Press Enter again on the untouched auto-inserted empty item to exit.
 - Shift+Enter adds a continuation line without a new list marker.
 - Tab/Shift+Tab indent/unindent a list item or selected lines in one undo step.
 - A single backtick creates an inline-code pair or wraps selected text.

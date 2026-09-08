@@ -81,7 +81,7 @@ pub(crate) fn is_list(line: &str) -> bool {
 }
 
 /// Return false when ordinary code-editor indentation should handle Enter.
-pub(crate) fn newline(buffer: &mut Buffer, soft: bool) -> bool {
+pub(crate) fn newline(buffer: &mut Buffer, soft: bool, exit_empty: bool) -> bool {
     if buffer.selection().is_some() {
         return false;
     }
@@ -106,7 +106,7 @@ pub(crate) fn newline(buffer: &mut Buffer, soft: bool) -> bool {
             prefix.next
         };
         buffer.insert(&format!("  \n{indent}"));
-    } else if line[prefix.content..].trim().is_empty() {
+    } else if exit_empty && line[prefix.content..].trim().is_empty() {
         let start = buffer.line_start_char(row) + prefix.container.chars().count();
         let end = buffer.line_start_char(row) + line.chars().count();
         let revision = buffer.revision();
@@ -141,7 +141,7 @@ mod tests {
         ] {
             let mut buffer = Buffer::empty();
             buffer.insert(source);
-            assert!(newline(&mut buffer, false), "{source}");
+            assert!(newline(&mut buffer, false, true), "{source}");
             assert_eq!(buffer.text(), expected);
             buffer.undo();
             assert_eq!(buffer.text(), source);
@@ -152,11 +152,11 @@ mod tests {
         let mut buffer = Buffer::empty();
         buffer.insert("- 🌍 hello");
         buffer.set_cursor_line_col(0, 4, false);
-        assert!(newline(&mut buffer, false));
+        assert!(newline(&mut buffer, false, true));
         assert_eq!(buffer.text(), "- 🌍 \n- hello");
         buffer.undo();
         buffer.move_line_edge(true, false);
-        assert!(newline(&mut buffer, true));
+        assert!(newline(&mut buffer, true, true));
         assert_eq!(buffer.text(), "- 🌍 hello  \n  ");
     }
     #[test]
@@ -164,12 +164,12 @@ mod tests {
         for source in ["---", "* * *", "plain", "1.no", "1234567890. no"] {
             let mut buffer = Buffer::empty();
             buffer.insert(source);
-            assert!(!newline(&mut buffer, false));
+            assert!(!newline(&mut buffer, false, true));
         }
         let mut buffer = Buffer::empty();
         buffer.insert("- item");
         buffer.set_cursor_line_col(0, 1, false);
-        assert!(!newline(&mut buffer, false));
+        assert!(!newline(&mut buffer, false, true));
     }
 }
 
