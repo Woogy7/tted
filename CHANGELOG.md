@@ -2,6 +2,12 @@
 
 All notable changes are documented here.
 
+## Unreleased
+
+- Focus TTED on terminal editing; remove integrated chat, agent API, approvals,
+  and agent-specific change tracking. External tools continue to edit files directly.
+- Remove agent commands and bindings; legacy agent configuration is ignored.
+
 ## 0.1.1 - 2026-08-20
 
 - Make task-list checkboxes clickable and undoable in Markdown reading view.

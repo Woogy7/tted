@@ -18,7 +18,6 @@ Press F1 in TTED for the built-in quick reference. The most common bindings are:
 | Alt+Right / Alt+Left | Portable next/previous tab fallback |
 | Ctrl+Shift+M or F6 | Markdown source/reader |
 | F8 | Problems / next diagnostic |
-| Ctrl+G / F9 | Toggle built-in Agent chat |
 | F11 | Focus Mode |
 | F1 | Help |
 
@@ -26,7 +25,7 @@ Explorer focus uses arrows, Enter, Left/Right, Home/End, Page Up/Down, mouse
 clicks, and wheel scrolling. N creates a file, Shift+N a directory, R renames,
 and D requests deletion. Esc or Tab returns to the document.
 
-All advanced actions—including Git, LSP, splits, agents, and configuration
+All advanced actions—including Git, LSP, splits, and configuration
 reload—are discoverable in the Command Palette. Custom bindings are documented
 in [CONFIGURATION.md](CONFIGURATION.md).
 
@@ -36,12 +35,3 @@ Command Palette instead of Ctrl+Shift+P.
 Press F3 to open the Keybindings menu. Select an action with arrows or the
 mouse, then press Enter (or click it again) and type the new shortcut. Delete
 resets the selected custom binding. Changes are saved for the workspace.
-
-In Agent chat, Enter sends, Shift+Enter adds a line, Esc stops active work (or
-returns to the document when idle), Ctrl+R retries, Ctrl+L starts a new
-conversation, Ctrl+K clears the visible chat, and Tab returns focus to the
-document without closing the panel. Ctrl+G focuses the open panel again. Mouse
-wheel or Page Up/Down scrolls chat history; Ctrl+Home/End jumps oldest/latest.
-Drag over conversation text and press Ctrl+C to copy the selection.
-The prompt supports arrows, Shift+Left/Right selection, Ctrl+A, Ctrl+C,
-Ctrl+X, Ctrl+V, terminal paste, and wrapped multiline input.

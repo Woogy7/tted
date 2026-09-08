@@ -1,5 +1,18 @@
 # TTED Development Roadmap
 
+## Current direction — September 2026
+
+TTED is focused on dependable, conventional terminal editing. Integrated chat,
+agent transport, approvals, and agent rollback have been removed. External tools
+work directly with files. Priorities are safe saves, external-change handling,
+undo/cursor continuity, responsive rendering/search, and Git/LSP usability.
+
+The phases below are historical development records; agent phases 8, 9, and 12
+are retired and do not describe current features. Earlier implementation remains
+in Git history.
+
+## Historical roadmap
+
 TTED — **Terminal Text Editor**, pronounced “Ted” — is a modern, intuitive, mouse-friendly and agent-native terminal text editor.
 
 The long-term goal is:
@@ -1243,6 +1256,8 @@ A small number of features that feel exceptionally good is more valuable than ra
 
 # Immediate Next Work
 
-Phase 12 is implemented for the initial Codex backend. Continue hands-on testing
-of first-run sign-in, longer conversations, edits, interruption, and review.
-Use that feedback before adding another provider or widening permissions.
+- [x] Remove integrated agent UI, transport, backend, and configuration.
+- [ ] Harden save permissions, symlinks, conflicts, and replacement ranges.
+- [ ] Preserve undo and cursor context across external reloads.
+- [ ] Improve large-file rendering and search responsiveness.
+- [ ] Verify core keyboard, mouse, Git, and language-server workflows.

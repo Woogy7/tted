@@ -56,8 +56,5 @@ language_id = "rust"
 
 The executable must be installed and available in `PATH`.
 
-## Agent API
 
-`[agent]` controls whether the local socket runs and separately grants read,
-buffer-write, file-create, file-delete, and command capabilities. Mutating
-capabilities default to false. See [AGENT_API.md](AGENT_API.md).
+Legacy `[agent]` settings are ignored; TTED no longer starts a local API or chat backend.

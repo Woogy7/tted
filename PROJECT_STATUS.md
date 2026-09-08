@@ -16,18 +16,12 @@ agent connection.
 - Configured LSP lifecycle, diagnostics, Problems panel, hover, definition,
   completion, references, rename, code actions, formatting, symbols, and
   signature help.
-- Permission-scoped local agent JSON-RPC using stable buffer IDs/revisions, plus
-  an optional prompt/activity/diff/accept/revert panel.
-- F9 built-in Codex chat with automatic CLI detection, device-code sign-in,
-  persistent conversation threads, streamed replies/activity/diffs, Stop,
-  Retry, New/Clear, role-labeled scrollback, nested-container-safe workspace
-  sandboxing, guarded destructive actions, and safe disk-change Accept/Revert.
 - Optional workspace TOML for editor, explorer, custom command keys, language
-  servers, and agent capabilities. Defaults require no configuration.
+  servers. Defaults require no configuration.
 
 ## Architecture and operations
 
-Editor state mutates only on the UI loop. Git, LSP, and agent transport use
+Editor state mutates only on the UI loop. Git and LSP use
 bounded service/event boundaries; managed children are cancelled and reaped.
 Lightweight diagnostic logs default to `/tmp/tted-<pid>.log`.
 
@@ -44,8 +38,8 @@ and configures a normal user's PATH.
 - Undo snapshots are full ropes and syntax highlighting is recomputed for
   visible lines, which are candidates for profiling-led optimization.
 - Explorer filtering is configurable but not yet gitignore-aware.
-- LSP servers and an agent backend are external optional processes.
-- The integrated agent UI is provider-neutral; TTED is not an agent harness.
+- Language servers are optional external processes.
+- External tools edit files directly; there is no built-in chat or agent API.
 
 See `ROADMAP.md` for phase history and `FINAL_TEST_CHECKLIST.md` for the
 release-candidate hands-on pass.

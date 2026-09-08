@@ -141,17 +141,17 @@ impl Buffer {
     pub fn revision(&self) -> u64 {
         self.revision
     }
-    pub fn apply_agent_edit(
+    pub fn replace_range(
         &mut self,
         expected_revision: u64,
         start: usize,
         end: usize,
         text: &str,
     ) -> Result<u64, &'static str> {
-        self.apply_agent_edits(expected_revision, &[(start, end, text.to_owned())])
+        self.replace_ranges(expected_revision, &[(start, end, text.to_owned())])
     }
 
-    pub fn apply_agent_edits(
+    pub fn replace_ranges(
         &mut self,
         expected_revision: u64,
         edits: &[(usize, usize, String)],
@@ -1120,11 +1120,11 @@ mod tests {
     }
 
     #[test]
-    fn agent_edit_rejects_stale_revisions() {
+    fn range_edit_rejects_stale_revisions() {
         let mut buffer = Buffer::from_text("hello".into(), None, false);
-        assert_eq!(buffer.apply_agent_edit(0, 0, 5, "world"), Ok(1));
+        assert_eq!(buffer.replace_range(0, 0, 5, "world"), Ok(1));
         assert_eq!(
-            buffer.apply_agent_edit(0, 0, 1, "x"),
+            buffer.replace_range(0, 0, 1, "x"),
             Err("stale buffer revision")
         );
         assert_eq!(buffer.text(), "world");

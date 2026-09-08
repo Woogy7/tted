@@ -1,5 +1,4 @@
 use std::{
-    collections::{HashMap, VecDeque},
     fs,
     io::{self, Write},
     path::{Component, Path, PathBuf},
@@ -18,7 +17,6 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
-use serde_json::{json, Value};
 use syntect::{
     easy::HighlightLines,
     highlighting::{FontStyle, Theme},
@@ -27,8 +25,6 @@ use syntect::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::agent::{AgentRequest, AgentServer};
-use crate::agent_backend::{AgentBackend, BackendCommand, BackendEvent};
 use crate::buffer::{Buffer, ExternalChange};
 use crate::command::{Command, CommandPalette};
 use crate::config::Config;
@@ -88,45 +84,9 @@ struct SplitState {
     direction: SplitDirection,
 }
 
-struct AgentMessage {
-    text: String,
-    path: Option<PathBuf>,
-    kind: AgentMessageKind,
-}
-
-#[derive(Clone, Copy)]
-enum AgentMessageKind {
-    Human,
-    Agent,
-    Activity,
-    Error,
-}
-
-struct AgentDiskChange {
-    before: Option<Vec<u8>>,
-    after: Option<Vec<u8>>,
-}
-
-struct AgentApproval {
-    id: Value,
-    detail: String,
-}
-
 struct KeybindingsMenu {
     selected: usize,
     capturing: bool,
-}
-
-#[derive(Clone, Debug)]
-enum BuiltinAgentStatus {
-    Idle,
-    Starting,
-    SignIn,
-    Ready,
-    Working,
-    LoginCode { url: String, code: String },
-    Missing,
-    Error(String),
 }
 
 pub struct Editor {
@@ -175,32 +135,6 @@ pub struct Editor {
     lsp_prompt: Option<LspPrompt>,
     split: Option<SplitState>,
     secondary_area: Option<Rect>,
-    agent: Option<AgentServer>,
-    agent_backend: Option<AgentBackend>,
-    agent_backend_status: BuiltinAgentStatus,
-    agent_last_prompt: Option<String>,
-    agent_turn_diff: String,
-    agent_stream_message: Option<usize>,
-    agent_disk_before: HashMap<PathBuf, Vec<u8>>,
-    agent_disk_changes: HashMap<PathBuf, AgentDiskChange>,
-    agent_approval: Option<AgentApproval>,
-    agent_activity: Vec<String>,
-    agent_panel_visible: bool,
-    agent_panel_focused: bool,
-    agent_input: String,
-    agent_input_cursor: usize,
-    agent_input_anchor: Option<usize>,
-    agent_transcript_anchor: Option<usize>,
-    agent_transcript_cursor: Option<usize>,
-    agent_transcript_text: String,
-    agent_transcript_hits: Vec<(u16, usize, String)>,
-    agent_messages: Vec<AgentMessage>,
-    agent_scroll: usize,
-    agent_prompts: VecDeque<String>,
-    agent_modified: HashMap<u64, (usize, u64)>,
-    agent_area: Option<Rect>,
-    agent_input_area: Option<Rect>,
-    agent_hits: Vec<(u16, PathBuf)>,
     syntaxes: SyntaxSet,
     theme: Theme,
     message: String,
@@ -235,9 +169,6 @@ impl Editor {
             .or_else(|| themes.themes.get("base16-eighties.dark"))
             .expect("bundled syntax theme")
             .clone();
-        let agent = (!cfg!(test) && config.agent.enabled)
-            .then(|| AgentServer::start(AgentServer::default_path()).ok())
-            .flatten();
         let mut editor = Self {
             buffers,
             active: 0,
@@ -289,32 +220,6 @@ impl Editor {
             lsp_prompt: None,
             split: None,
             secondary_area: None,
-            agent,
-            agent_backend: None,
-            agent_backend_status: BuiltinAgentStatus::Idle,
-            agent_last_prompt: None,
-            agent_turn_diff: String::new(),
-            agent_stream_message: None,
-            agent_disk_before: HashMap::new(),
-            agent_disk_changes: HashMap::new(),
-            agent_approval: None,
-            agent_activity: Vec::new(),
-            agent_panel_visible: false,
-            agent_panel_focused: false,
-            agent_input: String::new(),
-            agent_input_cursor: 0,
-            agent_input_anchor: None,
-            agent_transcript_anchor: None,
-            agent_transcript_cursor: None,
-            agent_transcript_text: String::new(),
-            agent_transcript_hits: Vec::new(),
-            agent_messages: Vec::new(),
-            agent_scroll: 0,
-            agent_prompts: VecDeque::new(),
-            agent_modified: HashMap::new(),
-            agent_area: None,
-            agent_input_area: None,
-            agent_hits: Vec::new(),
             syntaxes,
             theme,
             message,
@@ -368,11 +273,6 @@ impl Editor {
                 self.sync_lsp_change();
             }
             redraw |= self.poll_lsp();
-            redraw |= self.poll_agent_backend();
-            while let Some(request) = self.agent.as_ref().and_then(AgentServer::try_recv) {
-                self.handle_agent_request(request);
-                redraw = true;
-            }
             if redraw {
                 terminal.draw(|frame| self.render(frame))?;
             }
@@ -396,8 +296,6 @@ impl Editor {
                     return Ok(false);
                 } else if let Some(message) = &mut self.git_commit_prompt {
                     message.push_str(text.trim_end_matches(['\r', '\n']));
-                } else if self.agent_panel_focused {
-                    self.insert_agent_input(text.trim_end_matches(['\r', '\n']));
                 } else if let Some(prompt) = &mut self.lsp_prompt {
                     prompt.input.push_str(text.trim_end_matches(['\r', '\n']));
                 } else if let Some(path) = &mut self.path_prompt {
@@ -462,293 +360,141 @@ impl Editor {
                     || self.search.is_some()
                     || self.command_palette.is_some()
                     || self.explorer_context_visible => {}
-            Event::Mouse(mouse) => {
-                if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
-                    && !self
-                        .agent_area
-                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into()))
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left)
+                    if self
+                        .secondary_area
+                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into())) =>
                 {
-                    self.agent_panel_focused = false;
+                    self.focus_next_split();
                 }
-                match mouse.kind {
-                    MouseEventKind::ScrollUp
-                        if self.agent_area.is_some_and(|area| {
-                            area.contains((mouse.column, mouse.row).into())
-                        }) =>
-                    {
-                        self.agent_scroll = self.agent_scroll.saturating_add(3);
+                MouseEventKind::Down(MouseButton::Left)
+                    if self
+                        .problems_area
+                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into())) =>
+                {
+                    let area = self.problems_area.expect("Problems area checked");
+                    if mouse.row > area.y && mouse.row < area.bottom().saturating_sub(1) {
+                        let visible = usize::from(area.height.saturating_sub(2));
+                        let start = self
+                            .problems_selected
+                            .saturating_sub(visible.saturating_sub(1));
+                        self.open_problem(start + usize::from(mouse.row - area.y - 1));
                     }
-                    MouseEventKind::ScrollDown
-                        if self.agent_area.is_some_and(|area| {
-                            area.contains((mouse.column, mouse.row).into())
-                        }) =>
+                }
+                MouseEventKind::Down(MouseButton::Right)
+                    if self
+                        .sidebar_area
+                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into())) =>
+                {
+                    let area = self.sidebar_area.expect("sidebar area checked above");
+                    let height = usize::from(area.height.saturating_sub(2).max(1));
+                    let visible = usize::from(mouse.row.saturating_sub(area.y + 1));
+                    if mouse.row > area.y
+                        && mouse.row < area.y + area.height.saturating_sub(1)
+                        && self.explorer.scroll() + visible < self.explorer.rows().len()
                     {
-                        self.agent_scroll = self.agent_scroll.saturating_sub(3);
-                    }
-                    MouseEventKind::Drag(MouseButton::Left)
-                        if self.agent_input_area.is_some_and(|area| {
-                            area.contains((mouse.column, mouse.row).into())
-                        }) =>
-                    {
-                        let area = self.agent_input_area.expect("Agent input area checked");
-                        let position = agent_input_char_at(
-                            &self.agent_input,
-                            usize::from(area.width.saturating_sub(2).max(1)),
-                            usize::from(area.height.saturating_sub(2).max(1)),
-                            usize::from(mouse.row.saturating_sub(area.y + 1)),
-                            usize::from(mouse.column.saturating_sub(area.x + 1)),
-                        );
-                        self.set_agent_input_cursor(position, true);
-                    }
-                    MouseEventKind::Drag(MouseButton::Left)
-                        if self
-                            .agent_transcript_hits
-                            .iter()
-                            .any(|(row, _, _)| *row == mouse.row) =>
-                    {
-                        if let Some((_, offset, text)) = self
-                            .agent_transcript_hits
-                            .iter()
-                            .find(|(row, _, _)| *row == mouse.row)
-                        {
-                            let text_column = usize::from(
-                                mouse
-                                    .column
-                                    .saturating_sub(self.agent_area.expect("Agent area").x + 7),
-                            );
-                            self.agent_transcript_cursor =
-                                Some(*offset + text_column.min(text.chars().count()));
-                        }
-                    }
-                    MouseEventKind::Down(MouseButton::Left)
-                        if self.agent_area.is_some_and(|area| {
-                            area.contains((mouse.column, mouse.row).into())
-                        }) =>
-                    {
-                        let area = self.agent_area.expect("Agent area checked");
-                        if let Some(input_area) = self.agent_input_area.filter(|input_area| {
-                            input_area.contains((mouse.column, mouse.row).into())
-                        }) {
-                            let position = agent_input_char_at(
-                                &self.agent_input,
-                                usize::from(input_area.width.saturating_sub(2).max(1)),
-                                usize::from(input_area.height.saturating_sub(2).max(1)),
-                                usize::from(mouse.row.saturating_sub(input_area.y + 1)),
-                                usize::from(mouse.column.saturating_sub(input_area.x + 1)),
-                            );
-                            self.agent_panel_focused = true;
-                            self.set_agent_input_cursor(position, false);
-                            return Ok(false);
-                        }
-                        if let Some((_, offset, text)) = self
-                            .agent_transcript_hits
-                            .iter()
-                            .find(|(row, _, _)| *row == mouse.row)
-                        {
-                            let text_column = usize::from(mouse.column.saturating_sub(area.x + 7));
-                            let position = *offset + text_column.min(text.chars().count());
-                            self.agent_transcript_anchor = Some(position);
-                            self.agent_transcript_cursor = Some(position);
-                            self.agent_panel_focused = true;
-                            return Ok(false);
-                        }
-                        if self.agent_approval.is_some() {
-                            self.answer_agent_approval(mouse.column < area.x + area.width / 2);
-                            return Ok(false);
-                        }
-                        match &self.agent_backend_status {
-                            BuiltinAgentStatus::SignIn => {
-                                if let Some(backend) = &self.agent_backend {
-                                    backend.send(BackendCommand::Login);
-                                    self.agent_backend_status = BuiltinAgentStatus::Starting;
-                                }
-                                return Ok(false);
-                            }
-                            BuiltinAgentStatus::Missing => {
-                                self.message =
-                                "Install Codex: curl -fsSL https://chatgpt.com/codex/install.sh | sh"
-                                    .into();
-                                return Ok(false);
-                            }
-                            BuiltinAgentStatus::LoginCode { code, .. } => {
-                                let code = code.clone();
-                                self.copy_to_terminal_clipboard(&code)?;
-                                self.clipboard = Some(code);
-                                self.message = "Copied the Codex sign-in code".into();
-                                return Ok(false);
-                            }
-                            _ => {}
-                        }
-                        if mouse.row == area.bottom().saturating_sub(2) {
-                            let relative = mouse.column.saturating_sub(area.x);
-                            if relative < 8 {
-                                self.stop_agent();
-                            } else if relative < 16 {
-                                self.retry_agent();
-                            } else if relative < 22 {
-                                self.new_agent_conversation();
-                            } else {
-                                self.clear_agent_chat();
-                            }
-                        } else if mouse.row == area.bottom().saturating_sub(1) {
-                            let relative = mouse.column.saturating_sub(area.x);
-                            if relative < 8 {
-                                self.open_agent_diff();
-                            } else if relative < 17 {
-                                self.accept_agent_changes();
-                            } else {
-                                self.revert_agent_changes();
-                            }
-                        } else if mouse.row >= area.bottom().saturating_sub(4) {
-                            self.agent_panel_focused = true;
-                        } else if let Some((_, path)) = self
-                            .agent_hits
-                            .iter()
-                            .find(|(row, _)| *row == mouse.row)
-                            .cloned()
-                        {
-                            self.open_path(path);
-                        }
-                    }
-                    MouseEventKind::Down(MouseButton::Left)
-                        if self.secondary_area.is_some_and(|area| {
-                            area.contains((mouse.column, mouse.row).into())
-                        }) =>
-                    {
-                        self.focus_next_split();
-                    }
-                    MouseEventKind::Down(MouseButton::Left)
-                        if self.problems_area.is_some_and(|area| {
-                            area.contains((mouse.column, mouse.row).into())
-                        }) =>
-                    {
-                        let area = self.problems_area.expect("Problems area checked");
-                        if mouse.row > area.y && mouse.row < area.bottom().saturating_sub(1) {
-                            let visible = usize::from(area.height.saturating_sub(2));
-                            let start = self
-                                .problems_selected
-                                .saturating_sub(visible.saturating_sub(1));
-                            self.open_problem(start + usize::from(mouse.row - area.y - 1));
-                        }
-                    }
-                    MouseEventKind::Down(MouseButton::Right)
-                        if self.sidebar_area.is_some_and(|area| {
-                            area.contains((mouse.column, mouse.row).into())
-                        }) =>
-                    {
-                        let area = self.sidebar_area.expect("sidebar area checked above");
-                        let height = usize::from(area.height.saturating_sub(2).max(1));
-                        let visible = usize::from(mouse.row.saturating_sub(area.y + 1));
-                        if mouse.row > area.y
-                            && mouse.row < area.y + area.height.saturating_sub(1)
-                            && self.explorer.scroll() + visible < self.explorer.rows().len()
-                        {
-                            self.explorer.select_visible(visible, height);
-                            self.explorer.set_focused(true);
-                            self.explorer_context_visible = true;
-                        }
-                    }
-                    MouseEventKind::ScrollUp
-                        if self.sidebar_area.is_some_and(|area| {
-                            area.contains((mouse.column, mouse.row).into())
-                        }) =>
-                    {
-                        let height = self
-                            .sidebar_area
-                            .map_or(1, |area| usize::from(area.height.saturating_sub(2).max(1)));
-                        self.explorer.scroll_by(-3, height);
-                    }
-                    MouseEventKind::ScrollDown
-                        if self.sidebar_area.is_some_and(|area| {
-                            area.contains((mouse.column, mouse.row).into())
-                        }) =>
-                    {
-                        let height = self
-                            .sidebar_area
-                            .map_or(1, |area| usize::from(area.height.saturating_sub(2).max(1)));
-                        self.explorer.scroll_by(3, height);
-                    }
-                    MouseEventKind::Down(MouseButton::Left)
-                        if self.sidebar_area.is_some_and(|area| {
-                            area.contains((mouse.column, mouse.row).into())
-                        }) =>
-                    {
-                        let area = self.sidebar_area.expect("sidebar area checked above");
-                        let height = usize::from(area.height.saturating_sub(2).max(1));
-                        let visible = usize::from(mouse.row.saturating_sub(area.y + 1));
+                        self.explorer.select_visible(visible, height);
                         self.explorer.set_focused(true);
-                        if mouse.row > area.y
-                            && mouse.row < area.y + area.height.saturating_sub(1)
-                            && self.explorer.scroll() + visible < self.explorer.rows().len()
-                        {
-                            self.explorer.select_visible(visible, height);
-                            if let ExplorerAction::Open(path) = self.explorer.activate_selected() {
-                                self.open_path(path);
-                                self.explorer.set_focused(false);
-                            }
-                        }
+                        self.explorer_context_visible = true;
                     }
-                    MouseEventKind::Down(MouseButton::Left)
-                        if mouse.row == self.body.y.saturating_sub(1) =>
-                    {
-                        self.explorer.set_focused(false);
-                        if let Some((_, _, tab)) = self
-                            .tab_close_hits
-                            .iter()
-                            .find(|(start, end, _)| mouse.column >= *start && mouse.column < *end)
-                            .copied()
-                        {
-                            self.request_close_tab(tab);
-                        } else if let Some((_, _, tab)) = self
-                            .tab_hits
-                            .iter()
-                            .find(|(start, end, _)| mouse.column >= *start && mouse.column < *end)
-                            .copied()
-                        {
-                            self.active = tab;
-                            self.reset_view();
-                        }
-                    }
-                    MouseEventKind::Down(MouseButton::Left)
-                    | MouseEventKind::Drag(MouseButton::Left)
-                        if !self.markdown_reading[self.active]
-                            && self.body.contains((mouse.column, mouse.row).into()) =>
-                    {
-                        self.agent_panel_focused = false;
-                        self.explorer.set_focused(false);
-                        let line = self.top_line + usize::from(mouse.row - self.body.y);
-                        let col = self.left_col
-                            + usize::from(
-                                mouse.column.saturating_sub(self.body.x + self.gutter_width),
-                            );
-                        let select = matches!(mouse.kind, MouseEventKind::Drag(_));
-                        self.current_mut()
-                            .set_cursor_line_screen_col(line, col, select);
-                        self.ensure_visible();
-                    }
-                    MouseEventKind::Down(MouseButton::Left)
-                        if self.markdown_reading[self.active]
-                            && self.body.contains((mouse.column, mouse.row).into()) =>
-                    {
-                        self.agent_panel_focused = false;
-                        self.explorer.set_focused(false);
-                        let rendered_line =
-                            self.top_line + usize::from(mouse.row.saturating_sub(self.body.y));
-                        let rendered_column = usize::from(mouse.column.saturating_sub(self.body.x));
-                        self.toggle_markdown_task(rendered_line, rendered_column);
-                    }
-                    MouseEventKind::ScrollUp => self.top_line = self.top_line.saturating_sub(3),
-                    MouseEventKind::ScrollDown => {
-                        let max_top = if self.markdown_reading[self.active] {
-                            self.markdown_max_top()
-                        } else {
-                            self.document_max_top()
-                        };
-                        self.top_line = (self.top_line + 3).min(max_top)
-                    }
-                    _ => {}
                 }
-            }
+                MouseEventKind::ScrollUp
+                    if self
+                        .sidebar_area
+                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into())) =>
+                {
+                    let height = self
+                        .sidebar_area
+                        .map_or(1, |area| usize::from(area.height.saturating_sub(2).max(1)));
+                    self.explorer.scroll_by(-3, height);
+                }
+                MouseEventKind::ScrollDown
+                    if self
+                        .sidebar_area
+                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into())) =>
+                {
+                    let height = self
+                        .sidebar_area
+                        .map_or(1, |area| usize::from(area.height.saturating_sub(2).max(1)));
+                    self.explorer.scroll_by(3, height);
+                }
+                MouseEventKind::Down(MouseButton::Left)
+                    if self
+                        .sidebar_area
+                        .is_some_and(|area| area.contains((mouse.column, mouse.row).into())) =>
+                {
+                    let area = self.sidebar_area.expect("sidebar area checked above");
+                    let height = usize::from(area.height.saturating_sub(2).max(1));
+                    let visible = usize::from(mouse.row.saturating_sub(area.y + 1));
+                    self.explorer.set_focused(true);
+                    if mouse.row > area.y
+                        && mouse.row < area.y + area.height.saturating_sub(1)
+                        && self.explorer.scroll() + visible < self.explorer.rows().len()
+                    {
+                        self.explorer.select_visible(visible, height);
+                        if let ExplorerAction::Open(path) = self.explorer.activate_selected() {
+                            self.open_path(path);
+                            self.explorer.set_focused(false);
+                        }
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Left)
+                    if mouse.row == self.body.y.saturating_sub(1) =>
+                {
+                    self.explorer.set_focused(false);
+                    if let Some((_, _, tab)) = self
+                        .tab_close_hits
+                        .iter()
+                        .find(|(start, end, _)| mouse.column >= *start && mouse.column < *end)
+                        .copied()
+                    {
+                        self.request_close_tab(tab);
+                    } else if let Some((_, _, tab)) = self
+                        .tab_hits
+                        .iter()
+                        .find(|(start, end, _)| mouse.column >= *start && mouse.column < *end)
+                        .copied()
+                    {
+                        self.active = tab;
+                        self.reset_view();
+                    }
+                }
+                MouseEventKind::Down(MouseButton::Left)
+                | MouseEventKind::Drag(MouseButton::Left)
+                    if !self.markdown_reading[self.active]
+                        && self.body.contains((mouse.column, mouse.row).into()) =>
+                {
+                    self.explorer.set_focused(false);
+                    let line = self.top_line + usize::from(mouse.row - self.body.y);
+                    let col = self.left_col
+                        + usize::from(mouse.column.saturating_sub(self.body.x + self.gutter_width));
+                    let select = matches!(mouse.kind, MouseEventKind::Drag(_));
+                    self.current_mut()
+                        .set_cursor_line_screen_col(line, col, select);
+                    self.ensure_visible();
+                }
+                MouseEventKind::Down(MouseButton::Left)
+                    if self.markdown_reading[self.active]
+                        && self.body.contains((mouse.column, mouse.row).into()) =>
+                {
+                    self.explorer.set_focused(false);
+                    let rendered_line =
+                        self.top_line + usize::from(mouse.row.saturating_sub(self.body.y));
+                    let rendered_column = usize::from(mouse.column.saturating_sub(self.body.x));
+                    self.toggle_markdown_task(rendered_line, rendered_column);
+                }
+                MouseEventKind::ScrollUp => self.top_line = self.top_line.saturating_sub(3),
+                MouseEventKind::ScrollDown => {
+                    let max_top = if self.markdown_reading[self.active] {
+                        self.markdown_max_top()
+                    } else {
+                        self.document_max_top()
+                    };
+                    self.top_line = (self.top_line + 3).min(max_top)
+                }
+                _ => {}
+            },
             _ => {}
         }
         Ok(false)
@@ -764,9 +510,6 @@ impl Editor {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
-        if self.agent_panel_focused && !(ctrl && key.code == KeyCode::Char('q')) {
-            return self.agent_panel_key(key);
-        }
         if self.hover_popup.is_some() {
             self.hover_popup = None;
             return Ok(false);
@@ -834,9 +577,6 @@ impl Editor {
             self.problems_visible = true;
             return self.jump_to_problem(1);
         }
-        if key.code == KeyCode::F(9) {
-            return self.execute_command(Command::ToggleAgentPanel);
-        }
         if self.external_prompt.is_some() {
             return self.external_prompt_key(key);
         }
@@ -869,13 +609,6 @@ impl Editor {
         }
         if self.command_palette.is_some() {
             return self.command_palette_key(key);
-        }
-        if ctrl && matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G')) {
-            if self.agent_panel_visible {
-                self.agent_panel_focused = true;
-                return Ok(false);
-            }
-            return self.execute_command(Command::ToggleAgentPanel);
         }
         if ctrl && shift && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P')) {
             self.command_palette = Some(CommandPalette::new());
@@ -1600,33 +1333,6 @@ impl Editor {
                 }
             }
             Command::FocusNextSplit => self.focus_next_split(),
-            Command::ToggleAgentPanel => {
-                self.agent_panel_visible = !self.agent_panel_visible;
-                self.agent_panel_focused = self.agent_panel_visible;
-                if self.agent_panel_visible {
-                    self.ensure_agent_backend();
-                }
-            }
-            Command::AgentViewDiff => {
-                self.open_agent_diff();
-            }
-            Command::AgentAccept => self.accept_agent_changes(),
-            Command::AgentRevert => self.revert_agent_changes(),
-            Command::AgentAsk => {
-                self.agent_panel_visible = true;
-                self.agent_panel_focused = true;
-                self.ensure_agent_backend();
-            }
-            Command::AgentExplainSelection => self.enqueue_context_prompt("Explain this selection"),
-            Command::AgentRefactorSelection => {
-                self.enqueue_context_prompt("Refactor this selection")
-            }
-            Command::AgentWriteTests => {
-                self.enqueue_context_prompt("Write tests for the current context")
-            }
-            Command::AgentReviewDiff => {
-                self.enqueue_agent_prompt("Review the current Git diff".into())
-            }
             Command::OpenKeybindings => {
                 self.keybindings_menu = Some(KeybindingsMenu {
                     selected: 0,
@@ -2383,811 +2089,6 @@ impl Editor {
             .unwrap_or_default()
     }
 
-    fn handle_agent_request(&mut self, request: AgentRequest) {
-        let method = request.method.clone();
-        let params = request.params.clone();
-        let is_write = matches!(
-            method.as_str(),
-            "edit.apply"
-                | "edit.apply_batch"
-                | "editor.edit_text"
-                | "editor.open"
-                | "editor.focus_range"
-        );
-        let allowed = if method == "file.create" {
-            self.config.agent.allow_file_create
-        } else if method == "file.delete" {
-            self.config.agent.allow_file_delete
-        } else if method == "command.run" {
-            self.config.agent.allow_commands
-        } else if is_write {
-            self.config.agent.allow_write
-        } else {
-            self.config.agent.allow_read
-        };
-        let result = if !allowed {
-            Err(format!("permission denied for {method}"))
-        } else {
-            self.execute_agent_method(&method, &params)
-        };
-        self.agent_activity.push(format!(
-            "{} {}",
-            if result.is_ok() { "✓" } else { "!" },
-            method
-        ));
-        if self.agent_activity.len() > 100 {
-            self.agent_activity.remove(0);
-        }
-        self.message = format!("Agent: {method}");
-        request.reply(result);
-    }
-
-    fn execute_agent_method(&mut self, method: &str, params: &Value) -> Result<Value, String> {
-        match method {
-            "workspace.info" => Ok(json!({"root":self.explorer.root(),"socket":self.agent.as_ref().map(|agent|agent.path()),"buffers":self.buffers.len()})),
-            "workspace.files" => Ok(json!(collect_workspace_files(self.explorer.root(), 20_000))),
-            "buffer.list" => Ok(Value::Array(self.buffers.iter().map(|buffer| json!({"id":buffer.id(),"path":buffer.path(),"name":buffer.name(),"revision":buffer.revision(),"dirty":buffer.is_dirty(),"read_only":buffer.is_read_only()})).collect())),
-            "buffer.read" => { let buffer=self.agent_buffer(params)?; Ok(json!({"id":buffer.id(),"revision":buffer.revision(),"text":buffer.text()})) }
-            "buffer.revision" => { let buffer=self.agent_buffer(params)?; Ok(json!({"id":buffer.id(),"revision":buffer.revision()})) }
-            "editor.current_file" => Ok(json!({"buffer_id":self.current().id(),"path":self.current().path(),"revision":self.current().revision()})),
-            "editor.cursor" => { let (line,column)=self.current().cursor_line_col(); Ok(json!({"line":line,"column":column,"char_offset":self.current().cursor()})) }
-            "editor.selection" => Ok(json!({"range":self.current().selection(),"text":self.current().selected_text()})),
-            "editor.open" => { let path=self.safe_agent_path(params)?; self.open_path(path); Ok(json!({"buffer_id":self.current().id()})) }
-            "editor.focus_range" => { let id=required_u64(params,"buffer_id")?; let line=required_u64(params,"line")? as usize; let column=required_u64(params,"column")? as usize; let index=self.buffers.iter().position(|buffer|buffer.id()==id).ok_or("unknown buffer")?; self.active=index; self.update_active_split_buffer(); self.current_mut().set_cursor_line_col(line,column,false); self.ensure_visible(); Ok(json!({"focused":true})) }
-            "edit.apply" => { let id=required_u64(params,"buffer_id")?; let revision=required_u64(params,"revision")?; let start=required_u64(params,"start")? as usize; let end=required_u64(params,"end")? as usize; let text=params.get("text").and_then(Value::as_str).ok_or("missing text")?; let buffer=self.buffers.iter_mut().find(|buffer|buffer.id()==id).ok_or("unknown buffer")?; let revision=buffer.apply_agent_edit(revision,start,end,text).map_err(str::to_owned)?; let tracked=self.agent_modified.entry(id).or_insert((0,revision)); tracked.0+=1; tracked.1=revision; self.changed(); Ok(json!({"revision":revision})) }
-            "editor.edit_text" => self.apply_agent_text_operation(params),
-            "diagnostics.list" => Ok(json!(self.current_diagnostics().iter().map(|item|json!({"path":item.path,"line":item.line,"column":item.column,"severity":item.severity,"message":item.message})).collect::<Vec<_>>())),
-            "git.status" => Ok(json!({"text":self.git.snapshot().status_text()})),
-            "git.diff" => Ok(json!({"text":self.git.snapshot().workspace_diff()})),
-            "agent.next_prompt" => Ok(json!({"prompt":self.agent_prompts.pop_front()})),
-            "agent.respond" => { let text=params.get("text").and_then(Value::as_str).ok_or("missing text")?.to_owned(); let append=params.get("append").and_then(Value::as_bool).unwrap_or(false); if append { if let Some(last)=self.agent_messages.last_mut() { last.text.push_str(&text); } else { self.agent_messages.push(AgentMessage{text,path:None,kind:AgentMessageKind::Agent}); } } else { self.agent_messages.push(AgentMessage{text,path:None,kind:AgentMessageKind::Agent}); } self.agent_panel_visible=true; Ok(json!({"received":true})) }
-            "agent.activity" => { let text=params.get("text").and_then(Value::as_str).ok_or("missing text")?.to_owned(); let path=params.get("path").and_then(Value::as_str).map(|path|self.explorer.root().join(path)); self.agent_messages.push(AgentMessage{text,path,kind:AgentMessageKind::Activity}); self.agent_panel_visible=true; Ok(json!({"received":true})) }
-            "command.run" => { let id=params.get("id").and_then(Value::as_str).ok_or("missing command id")?; let command=Command::from_id(id).ok_or("unknown command")?; self.execute_command(command).map_err(|error|error.to_string())?; Ok(json!({"executed":id})) }
-            "file.create" => { let path=self.safe_agent_new_path(params)?; fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|error|error.to_string())?; self.explorer.refresh(); Ok(json!({"path":path})) }
-            "file.delete" => { let path=self.safe_agent_path(params)?; if self.path_is_open(&path) { return Err("close the file before deleting it".into()); } if path.is_dir() { fs::remove_dir(&path) } else { fs::remove_file(&path) }.map_err(|error|error.to_string())?; self.explorer.refresh(); Ok(json!({"deleted":path})) }
-            "edit.apply_batch" => self.apply_agent_batch(params),
-            _ => Err("method not found".into()),
-        }
-    }
-
-    fn agent_buffer(&self, params: &Value) -> Result<&Buffer, String> {
-        let id = required_u64(params, "buffer_id")?;
-        self.buffers
-            .iter()
-            .find(|buffer| buffer.id() == id)
-            .ok_or_else(|| "unknown buffer".into())
-    }
-
-    fn apply_agent_text_operation(&mut self, params: &Value) -> Result<Value, String> {
-        let path = self.safe_agent_path(params)?;
-        if !self.path_is_open(&path) {
-            self.open_path(path.clone());
-        }
-        let index = self
-            .buffers
-            .iter()
-            .position(|buffer| buffer.path().is_some_and(|open| same_path(open, &path)))
-            .ok_or("could not open path")?;
-        let expected_revision = required_u64(params, "revision")?;
-        if self.buffers[index].revision() != expected_revision {
-            return Err(format!(
-                "stale editor state: expected revision {expected_revision}, current revision {}",
-                self.buffers[index].revision()
-            ));
-        }
-        let operation = params
-            .get("operation")
-            .and_then(Value::as_str)
-            .ok_or("missing operation")?;
-        let text = params
-            .get("text")
-            .and_then(Value::as_str)
-            .ok_or("missing text")?
-            .replace("\r\n", "\n")
-            .replace('\r', "\n");
-        let (start, end, start_line, start_column) = match operation {
-            "insert" => {
-                let (offset, line, column) = agent_position(&self.buffers[index], params)?;
-                (offset, offset, line, column)
-            }
-            "replace_selection" => {
-                let selection = params.get("selection").ok_or("missing selection")?;
-                let start_value = selection.get("start").ok_or("missing selection.start")?;
-                let end_value = selection.get("end").ok_or("missing selection.end")?;
-                let (start, start_line, start_column) =
-                    agent_position(&self.buffers[index], start_value)?;
-                let (end, _, _) = agent_position(&self.buffers[index], end_value)?;
-                if start > end {
-                    return Err("selection start is after selection end".into());
-                }
-                (start, end, start_line, start_column)
-            }
-            "append" => {
-                let offset = self.buffers[index].len_chars();
-                let (line, column) = agent_offset_position(&self.buffers[index], offset);
-                (offset, offset, line, column)
-            }
-            _ => return Err("operation must be insert, replace_selection, or append".into()),
-        };
-        let inserted_chars = text.chars().count();
-        let revision = self.buffers[index]
-            .apply_agent_edit(expected_revision, start, end, &text)
-            .map_err(str::to_owned)?;
-        let (end_line, end_column) = inserted_end_position(start_line, start_column, &text);
-        let id = self.buffers[index].id();
-        let tracked = self.agent_modified.entry(id).or_insert((0, revision));
-        tracked.0 += 1;
-        tracked.1 = revision;
-        self.active = index;
-        self.update_active_split_buffer();
-        self.changed();
-        self.ensure_visible();
-        Ok(json!({
-            "buffer_id":id,
-            "revision":revision,
-            "range":{
-                "start":{"line":start_line,"column":start_column},
-                "end":{"line":end_line,"column":end_column},
-                "start_char":start,
-                "end_char":start + inserted_chars
-            }
-        }))
-    }
-    fn safe_agent_path(&self, params: &Value) -> Result<PathBuf, String> {
-        let raw = params
-            .get("path")
-            .and_then(Value::as_str)
-            .ok_or("missing path")?;
-        let path = self
-            .explorer
-            .root()
-            .join(raw)
-            .canonicalize()
-            .map_err(|error| error.to_string())?;
-        let root = self
-            .explorer
-            .root()
-            .canonicalize()
-            .map_err(|error| error.to_string())?;
-        path.starts_with(&root)
-            .then_some(path)
-            .ok_or_else(|| "path escapes workspace".into())
-    }
-    fn safe_agent_new_path(&self, params: &Value) -> Result<PathBuf, String> {
-        let raw = params
-            .get("path")
-            .and_then(Value::as_str)
-            .ok_or("missing path")?;
-        let path = self.explorer.root().join(raw);
-        let parent = path
-            .parent()
-            .ok_or("invalid path")?
-            .canonicalize()
-            .map_err(|error| error.to_string())?;
-        let root = self
-            .explorer
-            .root()
-            .canonicalize()
-            .map_err(|error| error.to_string())?;
-        parent
-            .starts_with(&root)
-            .then_some(path)
-            .ok_or_else(|| "path escapes workspace".into())
-    }
-
-    fn apply_agent_batch(&mut self, params: &Value) -> Result<Value, String> {
-        let edits = params
-            .get("edits")
-            .and_then(Value::as_array)
-            .ok_or("missing edits")?;
-        let mut grouped = HashMap::<u64, (u64, Vec<(usize, usize, String)>)>::new();
-        for edit in edits {
-            let id = required_u64(edit, "buffer_id")?;
-            let revision = required_u64(edit, "revision")?;
-            let start = required_u64(edit, "start")? as usize;
-            let end = required_u64(edit, "end")? as usize;
-            let text = edit
-                .get("text")
-                .and_then(Value::as_str)
-                .ok_or("missing text")?
-                .to_owned();
-            let entry = grouped.entry(id).or_insert_with(|| (revision, Vec::new()));
-            if entry.0 != revision {
-                return Err("batch contains conflicting revisions".into());
-            }
-            entry.1.push((start, end, text));
-        }
-        for (id, (revision, edits)) in &grouped {
-            let buffer = self
-                .buffers
-                .iter()
-                .find(|buffer| buffer.id() == *id)
-                .ok_or("unknown buffer")?;
-            if buffer.revision() != *revision {
-                return Err("stale buffer revision".into());
-            }
-            if buffer.is_read_only() {
-                return Err("buffer is read-only".into());
-            }
-            if edits
-                .iter()
-                .any(|(start, end, _)| start > end || *end > buffer.len_chars())
-            {
-                return Err("invalid edit range".into());
-            }
-        }
-        let mut results = Vec::new();
-        for (id, (revision, edits)) in grouped {
-            let buffer = self
-                .buffers
-                .iter_mut()
-                .find(|buffer| buffer.id() == id)
-                .ok_or("unknown buffer")?;
-            let revision = buffer
-                .apply_agent_edits(revision, &edits)
-                .map_err(str::to_owned)?;
-            results.push(json!({"buffer_id":id,"revision":revision}));
-            let tracked = self.agent_modified.entry(id).or_insert((0, revision));
-            tracked.0 += 1;
-            tracked.1 = revision;
-        }
-        self.changed();
-        Ok(Value::Array(results))
-    }
-
-    fn agent_panel_key(&mut self, key: KeyEvent) -> Result<bool> {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        if self.agent_approval.is_some() {
-            match key.code {
-                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    self.answer_agent_approval(true)
-                }
-                KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
-                    self.answer_agent_approval(false)
-                }
-                _ => {}
-            }
-            return Ok(false);
-        }
-        match key.code {
-            KeyCode::Tab => self.agent_panel_focused = false,
-            KeyCode::Char('g') | KeyCode::Char('G') if ctrl => self.agent_panel_focused = false,
-            KeyCode::PageUp => self.agent_scroll = self.agent_scroll.saturating_add(8),
-            KeyCode::PageDown => self.agent_scroll = self.agent_scroll.saturating_sub(8),
-            KeyCode::Home if ctrl => self.agent_scroll = usize::MAX,
-            KeyCode::End if ctrl => self.agent_scroll = 0,
-            KeyCode::Esc if matches!(self.agent_backend_status, BuiltinAgentStatus::Working) => {
-                self.stop_agent()
-            }
-            KeyCode::Esc => self.agent_panel_focused = false,
-            KeyCode::Char('l') if ctrl => self.new_agent_conversation(),
-            KeyCode::Char('r') if ctrl => self.retry_agent(),
-            KeyCode::Char('k') if ctrl => self.clear_agent_chat(),
-            KeyCode::Char('a') if ctrl => {
-                self.agent_input_anchor = Some(0);
-                self.agent_input_cursor = self.agent_input.chars().count();
-            }
-            KeyCode::Char('c') if ctrl => {
-                if let Some(text) = self.selected_agent_input() {
-                    self.copy_to_terminal_clipboard(&text)?;
-                    self.clipboard = Some(text);
-                    self.message = "Copied agent prompt selection".into();
-                } else if let Some(text) = self.selected_agent_transcript() {
-                    self.copy_to_terminal_clipboard(&text)?;
-                    self.clipboard = Some(text);
-                    self.message = "Copied agent conversation selection".into();
-                }
-            }
-            KeyCode::Char('x') if ctrl => {
-                if let Some(text) = self.selected_agent_input() {
-                    self.copy_to_terminal_clipboard(&text)?;
-                    self.clipboard = Some(text);
-                    self.delete_agent_input_selection();
-                }
-            }
-            KeyCode::Char('v') if ctrl => {
-                if let Some(text) = self.clipboard.clone() {
-                    self.insert_agent_input(&text);
-                } else {
-                    self.message =
-                        "TTED clipboard is empty; use your terminal's paste shortcut".into();
-                }
-            }
-            KeyCode::Left => self.move_agent_input_cursor(-1, shift),
-            KeyCode::Right => self.move_agent_input_cursor(1, shift),
-            KeyCode::Home => self.set_agent_input_cursor(0, shift),
-            KeyCode::End => {
-                let end = self.agent_input.chars().count();
-                self.set_agent_input_cursor(end, shift);
-            }
-            KeyCode::Enter if shift => self.insert_agent_input("\n"),
-            KeyCode::Backspace => self.backspace_agent_input(),
-            KeyCode::Enter => {
-                if matches!(self.agent_backend_status, BuiltinAgentStatus::SignIn) {
-                    if let Some(backend) = &self.agent_backend {
-                        backend.send(BackendCommand::Login);
-                        self.agent_backend_status = BuiltinAgentStatus::Starting;
-                    }
-                    return Ok(false);
-                }
-                let prompt = std::mem::take(&mut self.agent_input);
-                self.agent_input_cursor = 0;
-                self.agent_input_anchor = None;
-                if !prompt.trim().is_empty() {
-                    self.enqueue_agent_prompt(prompt);
-                }
-            }
-            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.insert_agent_input(&character.to_string())
-            }
-            _ => {}
-        }
-        Ok(false)
-    }
-
-    fn agent_input_selection(&self) -> Option<(usize, usize)> {
-        self.agent_input_anchor
-            .filter(|anchor| *anchor != self.agent_input_cursor)
-            .map(|anchor| {
-                if anchor < self.agent_input_cursor {
-                    (anchor, self.agent_input_cursor)
-                } else {
-                    (self.agent_input_cursor, anchor)
-                }
-            })
-    }
-
-    fn selected_agent_input(&self) -> Option<String> {
-        let (start, end) = self.agent_input_selection()?;
-        Some(
-            self.agent_input
-                .chars()
-                .skip(start)
-                .take(end - start)
-                .collect(),
-        )
-    }
-
-    fn agent_transcript_selection(&self) -> Option<(usize, usize)> {
-        let (anchor, cursor) = (self.agent_transcript_anchor?, self.agent_transcript_cursor?);
-        (anchor != cursor).then_some(if anchor < cursor {
-            (anchor, cursor)
-        } else {
-            (cursor, anchor)
-        })
-    }
-
-    fn selected_agent_transcript(&self) -> Option<String> {
-        let (start, end) = self.agent_transcript_selection()?;
-        Some(
-            self.agent_transcript_text
-                .chars()
-                .skip(start)
-                .take(end - start)
-                .collect(),
-        )
-    }
-
-    fn delete_agent_input_selection(&mut self) -> bool {
-        let Some((start, end)) = self.agent_input_selection() else {
-            return false;
-        };
-        self.agent_input = self
-            .agent_input
-            .chars()
-            .take(start)
-            .chain(self.agent_input.chars().skip(end))
-            .collect();
-        self.agent_input_cursor = start;
-        self.agent_input_anchor = None;
-        true
-    }
-
-    fn insert_agent_input(&mut self, text: &str) {
-        self.delete_agent_input_selection();
-        let cursor = self.agent_input_cursor;
-        self.agent_input = self
-            .agent_input
-            .chars()
-            .take(cursor)
-            .chain(text.chars())
-            .chain(self.agent_input.chars().skip(cursor))
-            .collect();
-        self.agent_input_cursor += text.chars().count();
-        self.agent_input_anchor = None;
-    }
-
-    fn backspace_agent_input(&mut self) {
-        if self.delete_agent_input_selection() || self.agent_input_cursor == 0 {
-            return;
-        }
-        self.agent_input_anchor = Some(self.agent_input_cursor - 1);
-        self.delete_agent_input_selection();
-    }
-
-    fn set_agent_input_cursor(&mut self, cursor: usize, select: bool) {
-        if select {
-            self.agent_input_anchor
-                .get_or_insert(self.agent_input_cursor);
-        } else {
-            self.agent_input_anchor = None;
-        }
-        self.agent_input_cursor = cursor.min(self.agent_input.chars().count());
-    }
-
-    fn move_agent_input_cursor(&mut self, delta: isize, select: bool) {
-        let cursor = if delta < 0 {
-            self.agent_input_cursor.saturating_sub(delta.unsigned_abs())
-        } else {
-            self.agent_input_cursor
-                .saturating_add(delta as usize)
-                .min(self.agent_input.chars().count())
-        };
-        self.set_agent_input_cursor(cursor, select);
-    }
-
-    fn enqueue_agent_prompt(&mut self, prompt: String) {
-        if let Some(index) = self
-            .buffers
-            .iter()
-            .position(|buffer| buffer.is_dirty() && buffer.path().is_none())
-        {
-            self.active = index;
-            self.update_active_split_buffer();
-            self.agent_input = prompt;
-            self.agent_input_cursor = self.agent_input.chars().count();
-            self.agent_input_anchor = None;
-            self.agent_messages.push(AgentMessage {
-                text: "! Give the untitled file a name, then send again".into(),
-                path: None,
-                kind: AgentMessageKind::Error,
-            });
-            self.agent_panel_focused = false;
-            self.path_prompt = Some(String::new());
-            self.message = "Name the untitled file so Codex can work with it".into();
-            return;
-        }
-        let mut saved = Vec::new();
-        for buffer in self.buffers.iter_mut().filter(|buffer| buffer.is_dirty()) {
-            let name = buffer.name();
-            if let Err(error) = buffer.save() {
-                self.agent_input = prompt;
-                self.agent_input_cursor = self.agent_input.chars().count();
-                self.agent_input_anchor = None;
-                self.agent_messages.push(AgentMessage {
-                    text: format!("! Could not synchronize {name}: {error}"),
-                    path: None,
-                    kind: AgentMessageKind::Error,
-                });
-                self.message = format!("Could not save {name} for Codex");
-                return;
-            }
-            if let Some(path) = buffer.path() {
-                saved.push(path.to_path_buf());
-            }
-        }
-        if !saved.is_empty() {
-            self.explorer.refresh();
-            self.git.request_refresh();
-            if let Some(lsp) = &self.lsp {
-                for path in &saved {
-                    lsp.save(path.clone());
-                }
-            }
-        }
-        self.ensure_agent_backend();
-        self.agent_messages.push(AgentMessage {
-            text: prompt.clone(),
-            path: None,
-            kind: AgentMessageKind::Human,
-        });
-        self.agent_scroll = 0;
-        self.agent_last_prompt = Some(prompt.clone());
-        self.agent_disk_before = self.capture_workspace_files();
-        self.agent_disk_changes.clear();
-        if let Some(backend) = &self.agent_backend {
-            backend.send(BackendCommand::Prompt(
-                self.agent_prompt_with_context(&prompt),
-            ));
-        } else {
-            self.agent_prompts.push_back(prompt);
-        }
-        self.agent_panel_visible = true;
-        self.message = if saved.is_empty() {
-            "Sent to Codex".into()
-        } else {
-            format!("Saved {} open file(s) and sent to Codex", saved.len())
-        };
-    }
-
-    fn ensure_agent_backend(&mut self) {
-        if self.agent_backend.is_none() && !cfg!(test) {
-            self.agent_backend_status = BuiltinAgentStatus::Starting;
-            self.agent_backend = Some(AgentBackend::start(self.explorer.root().to_path_buf()));
-        }
-    }
-
-    fn agent_prompt_with_context(&self, prompt: &str) -> String {
-        let path = self
-            .current()
-            .path()
-            .and_then(|path| path.strip_prefix(self.explorer.root()).ok())
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| self.current().name());
-        let (line, column) = self.current().cursor_line_col();
-        let selection = self.current().selected_text().unwrap_or_default();
-        let selection_range = self.current().selection().map_or_else(
-            || "none".into(),
-            |(start, end)| {
-                let start = agent_offset_position(self.current(), start);
-                let end = agent_offset_position(self.current(), end);
-                format!("{}:{}-{}:{}", start.0, start.1, end.0, end.1)
-            },
-        );
-        format!(
-            "{prompt}\n\nTTED context (zero-based Unicode line:column):\nCurrent file: {path}\nCursor: {line}:{column}\nSelection range: {selection_range}\nSelection text:\n{selection}"
-        )
-    }
-
-    fn poll_agent_backend(&mut self) -> bool {
-        let mut changed = false;
-        while let Some(event) = self.agent_backend.as_ref().and_then(AgentBackend::try_recv) {
-            changed = true;
-            match event {
-                BackendEvent::Starting => self.agent_backend_status = BuiltinAgentStatus::Starting,
-                BackendEvent::Missing => self.agent_backend_status = BuiltinAgentStatus::Missing,
-                BackendEvent::Ready { authenticated } => {
-                    self.agent_backend_status = if authenticated {
-                        BuiltinAgentStatus::Ready
-                    } else {
-                        BuiltinAgentStatus::SignIn
-                    };
-                }
-                BackendEvent::LoginCode { url, code } => {
-                    self.agent_backend_status = BuiltinAgentStatus::LoginCode {
-                        url: url.clone(),
-                        code: code.clone(),
-                    };
-                    self.agent_messages.push(AgentMessage {
-                        text: format!("Sign in at {url} with code {code}"),
-                        path: None,
-                        kind: AgentMessageKind::Activity,
-                    });
-                }
-                BackendEvent::TurnStarted => {
-                    self.agent_backend_status = BuiltinAgentStatus::Working;
-                    self.agent_turn_diff.clear();
-                    self.agent_messages.push(AgentMessage {
-                        text: String::new(),
-                        path: None,
-                        kind: AgentMessageKind::Agent,
-                    });
-                    self.agent_stream_message = Some(self.agent_messages.len() - 1);
-                }
-                BackendEvent::Delta(delta) => {
-                    if let Some(index) = self.agent_stream_message {
-                        if let Some(message) = self.agent_messages.get_mut(index) {
-                            message.text.push_str(&delta);
-                        }
-                    }
-                }
-                BackendEvent::Activity(text) => self.agent_messages.push(AgentMessage {
-                    text,
-                    path: None,
-                    kind: AgentMessageKind::Activity,
-                }),
-                BackendEvent::Approval { id, detail } => {
-                    self.agent_approval = Some(AgentApproval { id, detail });
-                    self.agent_panel_focused = true;
-                    self.message = "Codex is waiting for your approval".into();
-                }
-                BackendEvent::Diff(diff) => self.agent_turn_diff = diff,
-                BackendEvent::Completed(status) => {
-                    self.agent_approval = None;
-                    self.agent_stream_message = None;
-                    self.agent_backend_status = BuiltinAgentStatus::Ready;
-                    self.agent_messages.push(AgentMessage {
-                        text: format!("✓ Codex {status}"),
-                        path: None,
-                        kind: AgentMessageKind::Activity,
-                    });
-                    self.explorer.refresh();
-                    self.git.request_refresh();
-                    changed |= self.check_external_files();
-                    self.finish_agent_disk_changes();
-                }
-                BackendEvent::Error(error) => {
-                    self.agent_approval = None;
-                    self.agent_stream_message = None;
-                    self.agent_backend_status = BuiltinAgentStatus::Error(error.clone());
-                    self.agent_messages.push(AgentMessage {
-                        text: error,
-                        path: None,
-                        kind: AgentMessageKind::Error,
-                    });
-                }
-            }
-        }
-        changed
-    }
-
-    fn stop_agent(&mut self) {
-        if let Some(backend) = &self.agent_backend {
-            backend.send(BackendCommand::Interrupt);
-            self.message = "Stopping Codex…".into();
-        }
-    }
-
-    fn answer_agent_approval(&mut self, accept: bool) {
-        let Some(approval) = self.agent_approval.take() else {
-            return;
-        };
-        if let Some(backend) = &self.agent_backend {
-            backend.send(BackendCommand::Approval {
-                id: approval.id,
-                accept,
-            });
-        }
-        self.message = if accept {
-            "Allowed this Codex action"
-        } else {
-            "Declined this Codex action"
-        }
-        .into();
-    }
-
-    fn new_agent_conversation(&mut self) {
-        if let Some(backend) = &self.agent_backend {
-            backend.send(BackendCommand::NewConversation);
-        }
-        self.agent_messages.clear();
-        self.agent_scroll = 0;
-        self.agent_turn_diff.clear();
-        self.agent_stream_message = None;
-        self.message = "Started a new Codex conversation".into();
-    }
-
-    fn retry_agent(&mut self) {
-        if let Some(prompt) = self.agent_last_prompt.clone() {
-            self.enqueue_agent_prompt(prompt);
-        } else {
-            self.message = "There is no prompt to retry".into();
-        }
-    }
-
-    fn clear_agent_chat(&mut self) {
-        self.agent_messages.clear();
-        self.agent_scroll = 0;
-        self.message = "Cleared Agent chat".into();
-    }
-
-    fn open_agent_diff(&mut self) {
-        let text = if self.agent_turn_diff.is_empty() {
-            self.git.snapshot().workspace_diff()
-        } else {
-            self.agent_turn_diff.clone()
-        };
-        self.open_read_only("Agent Changes.diff", text);
-    }
-
-    fn capture_workspace_files(&self) -> HashMap<PathBuf, Vec<u8>> {
-        let root = self.explorer.root();
-        let mut total = 0usize;
-        collect_workspace_files(root, 20_000)
-            .into_iter()
-            .filter_map(|relative| {
-                let path = root.join(relative);
-                let data = fs::read(&path).ok()?;
-                if data.len() > 2_000_000 || total.saturating_add(data.len()) > 20_000_000 {
-                    return None;
-                }
-                total += data.len();
-                Some((path, data))
-            })
-            .collect()
-    }
-
-    fn finish_agent_disk_changes(&mut self) {
-        let after = self.capture_workspace_files();
-        let mut paths = self
-            .agent_disk_before
-            .keys()
-            .chain(after.keys())
-            .cloned()
-            .collect::<Vec<_>>();
-        paths.sort();
-        paths.dedup();
-        self.agent_disk_changes = paths
-            .into_iter()
-            .filter_map(|path| {
-                let before = self.agent_disk_before.get(&path).cloned();
-                let after = after.get(&path).cloned();
-                (before != after).then_some((path, AgentDiskChange { before, after }))
-            })
-            .collect();
-    }
-
-    fn enqueue_context_prompt(&mut self, instruction: &str) {
-        let path = self
-            .current()
-            .path()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| self.current().name());
-        let (line, column) = self.current().cursor_line_col();
-        let selection = self.current().selected_text().unwrap_or_default();
-        self.enqueue_agent_prompt(format!(
-            "{instruction}\nFile: {path}\nCursor: {}:{}\nSelection:\n{selection}",
-            line + 1,
-            column + 1
-        ));
-    }
-
-    fn accept_agent_changes(&mut self) {
-        let ids = self.agent_modified.keys().copied().collect::<Vec<_>>();
-        let mut saved = 0;
-        for id in ids {
-            if let Some(buffer) = self.buffers.iter_mut().find(|buffer| buffer.id() == id) {
-                if buffer.path().is_some() && buffer.save().is_ok() {
-                    saved += 1;
-                    self.agent_modified.remove(&id);
-                }
-            }
-        }
-        let disk = self.agent_disk_changes.len();
-        self.agent_disk_changes.clear();
-        self.agent_disk_before.clear();
-        self.git.request_refresh();
-        self.message = if self.agent_modified.is_empty() {
-            format!("Accepted {disk} Codex file(s) and saved {saved} API-edited file(s)")
-        } else {
-            format!(
-                "Saved {saved} file(s); unsaved agent changes remain in {} buffer(s)",
-                self.agent_modified.len()
-            )
-        };
-    }
-
-    fn revert_agent_changes(&mut self) {
-        let changes = std::mem::take(&mut self.agent_modified);
-        let mut skipped = 0;
-        for (id, (count, revision)) in changes {
-            if let Some(buffer) = self.buffers.iter_mut().find(|buffer| buffer.id() == id) {
-                if buffer.revision() != revision {
-                    self.agent_modified.insert(id, (count, revision));
-                    skipped += 1;
-                    continue;
-                }
-                for _ in 0..count {
-                    buffer.undo();
-                }
-            }
-        }
-        let disk_changes = std::mem::take(&mut self.agent_disk_changes);
-        for (path, change) in disk_changes {
-            let current = fs::read(&path).ok();
-            if current != change.after {
-                self.agent_disk_changes.insert(path, change);
-                skipped += 1;
-                continue;
-            }
-            let result = match change.before {
-                Some(data) => fs::write(&path, data),
-                None => fs::remove_file(&path),
-            };
-            if result.is_err() {
-                skipped += 1;
-            }
-        }
-        self.explorer.refresh();
-        self.git.request_refresh();
-        let _ = self.check_external_files();
-        self.message = if skipped == 0 {
-            "Reverted tracked agent changes".into()
-        } else {
-            format!("Revert skipped {skipped} buffer(s) changed after the agent edit")
-        };
-    }
     fn reset_view(&mut self) {
         self.top_line = 0;
         self.left_col = 0;
@@ -3233,7 +2134,7 @@ impl Editor {
         let replacement = if task.checked { " " } else { "x" };
         if self
             .current_mut()
-            .apply_agent_edit(
+            .replace_range(
                 revision,
                 task.source_marker_char,
                 task.source_marker_char + 1,
@@ -3266,21 +2167,12 @@ impl Editor {
         .split(frame.area());
         self.sidebar_area = None;
         self.problems_area = None;
-        self.agent_area = None;
-        self.agent_hits.clear();
         let mut workspace_area = areas[1];
         if self.problems_visible && !self.focus_mode && areas[1].height >= 10 {
             let sections =
                 Layout::vertical([Constraint::Min(1), Constraint::Length(8)]).split(areas[1]);
             workspace_area = sections[0];
             self.problems_area = Some(sections[1]);
-        }
-        if self.agent_panel_visible && !self.focus_mode && workspace_area.width >= 60 {
-            let columns =
-                Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)])
-                    .split(workspace_area);
-            workspace_area = columns[0];
-            self.agent_area = Some(columns[1]);
         }
         if self.focus_mode {
             self.body = frame.area();
@@ -3410,7 +2302,6 @@ impl Editor {
                 self.render_explorer_context(frame);
             }
             self.render_problems(frame);
-            self.render_agent_panel(frame);
             self.render_lsp_popups(frame);
             self.render_git_prompts(frame);
             self.render_keybindings_menu(frame);
@@ -3526,12 +2417,8 @@ impl Editor {
         let lsp = self.lsp.as_ref().map_or(String::new(), |service| {
             format!("   LSP {}", service.status())
         });
-        let agent = self
-            .agent
-            .as_ref()
-            .map_or(String::new(), |_| "   Agent API".into());
         let status = format!(
-            "{left}   Ln {}, Col {}{git}{lsp}{agent}   F1 help  Ctrl+G agent  Ctrl+S save  Ctrl+Q quit",
+            "{left}   Ln {}, Col {}{git}{lsp}   F1 help  Ctrl+S save  Ctrl+Q quit",
             line + 1,
             char_col + 1
         );
@@ -3582,7 +2469,6 @@ impl Editor {
             self.render_explorer_context(frame);
         }
         self.render_problems(frame);
-        self.render_agent_panel(frame);
         self.render_lsp_popups(frame);
         self.render_git_prompts(frame);
         self.render_keybindings_menu(frame);
@@ -3625,7 +2511,6 @@ impl Editor {
             "  Explorer: arrows, Enter, Esc/Tab      Navigate/open/return",
             "  Explorer: N / Shift+N / R / D         New file/dir, rename/delete",
             "  Ctrl+Shift+M / F6                     Markdown reading view",
-            "  Ctrl+G / F9                           Toggle Agent chat",
             "  F11                                   Toggle Focus Mode",
             "  Ctrl+Q                                Quit",
             "",
@@ -3758,259 +2643,6 @@ impl Editor {
                 ),
             area,
         );
-    }
-
-    fn render_agent_panel(&mut self, frame: &mut Frame) {
-        let Some(area) = self.agent_area else {
-            return;
-        };
-        let input_width = usize::from(area.width.saturating_sub(4).max(1));
-        let input_lines = wrap_agent_text(&self.agent_input, input_width).len().max(1);
-        let input_height = (input_lines as u16).saturating_add(2).clamp(3, 8);
-        let sections = Layout::vertical([
-            Constraint::Min(3),
-            Constraint::Length(input_height),
-            Constraint::Length(2),
-        ])
-        .split(area);
-        self.agent_input_area = Some(sections[1]);
-        let visible = usize::from(sections[0].height.saturating_sub(2));
-        let content_width = usize::from(sections[0].width.saturating_sub(10).max(1));
-        let mut transcript = Vec::<(&str, Color, Color, String, Option<PathBuf>, usize)>::new();
-        self.agent_transcript_text.clear();
-        for message in &self.agent_messages {
-            let (label, color, background) = match message.kind {
-                AgentMessageKind::Human => ("YOU   ", theme::BLUE, theme::SURFACE0),
-                AgentMessageKind::Agent => ("CODEX ", theme::GREEN, theme::MANTLE),
-                AgentMessageKind::Activity => ("  ·   ", theme::OVERLAY0, theme::MANTLE),
-                AgentMessageKind::Error => ("  !   ", theme::RED, theme::MANTLE),
-            };
-            for (index, text) in wrap_agent_text(&message.text, content_width)
-                .into_iter()
-                .enumerate()
-            {
-                let offset = self.agent_transcript_text.chars().count();
-                self.agent_transcript_text.push_str(&text);
-                self.agent_transcript_text.push('\n');
-                transcript.push((
-                    if index == 0 { label } else { "      " },
-                    color,
-                    background,
-                    text,
-                    message.path.clone(),
-                    offset,
-                ));
-            }
-        }
-        let max_scroll = transcript.len().saturating_sub(visible);
-        self.agent_scroll = self.agent_scroll.min(max_scroll);
-        let start = transcript
-            .len()
-            .saturating_sub(visible)
-            .saturating_sub(self.agent_scroll);
-        self.agent_transcript_hits.clear();
-        let transcript_selection = self.agent_transcript_selection();
-        let lines = transcript
-            .iter()
-            .skip(start)
-            .take(visible)
-            .enumerate()
-            .map(
-                |(visible_offset, (label, color, background, text, path, text_offset))| {
-                    let row = sections[0].y + 1 + visible_offset as u16;
-                    if let Some(path) = path {
-                        self.agent_hits.push((row, path.clone()));
-                    }
-                    self.agent_transcript_hits
-                        .push((row, *text_offset, text.clone()));
-                    let mut spans = vec![Span::styled(
-                        *label,
-                        Style::default().fg(*color).add_modifier(Modifier::BOLD),
-                    )];
-                    for (character_offset, character) in text.chars().enumerate() {
-                        let position = *text_offset + character_offset;
-                        let selected =
-                            transcript_selection.is_some_and(|(selection_start, selection_end)| {
-                                position >= selection_start && position < selection_end
-                            });
-                        spans.push(Span::styled(
-                            character.to_string(),
-                            if selected {
-                                Style::default().bg(theme::BLUE).fg(theme::BASE)
-                            } else {
-                                Style::default().fg(theme::TEXT)
-                            },
-                        ));
-                    }
-                    Line::from(spans).style(Style::default().bg(*background))
-                },
-            )
-            .collect::<Vec<_>>();
-        let status = match &self.agent_backend_status {
-            BuiltinAgentStatus::Idle => "Agent",
-            BuiltinAgentStatus::Starting => "Codex — connecting…",
-            BuiltinAgentStatus::SignIn => "Codex — press Enter to sign in",
-            BuiltinAgentStatus::Ready if self.agent_scroll > 0 => "Codex — history (End: latest)",
-            BuiltinAgentStatus::Ready => "Codex — ready",
-            BuiltinAgentStatus::Working => "Codex — working (Esc stops)",
-            BuiltinAgentStatus::LoginCode { .. } => "Codex — waiting for sign-in",
-            BuiltinAgentStatus::Missing => "Codex not installed — install the Codex CLI",
-            BuiltinAgentStatus::Error(_) => "Codex — needs attention",
-        };
-        frame.render_widget(
-            Paragraph::new(lines)
-                .style(Style::default().bg(theme::MANTLE))
-                .block(
-                    Block::bordered()
-                        .title(format!(" {status} "))
-                        .border_style(Style::default().fg(theme::MAUVE)),
-                ),
-            sections[0],
-        );
-        let selection = self.agent_input_selection();
-        let mut input_lines = Vec::<Line<'static>>::new();
-        let mut input_spans = vec![Span::styled("> ", Style::default().fg(theme::MAUVE))];
-        let mut input_column = 2;
-        for (index, character) in self.agent_input.chars().enumerate() {
-            if self.agent_panel_focused && index == self.agent_input_cursor {
-                if input_column >= input_width {
-                    input_lines.push(Line::from(std::mem::take(&mut input_spans)));
-                    input_column = 0;
-                }
-                input_spans.push(Span::styled("▏", Style::default().fg(theme::GREEN)));
-                input_column += 1;
-            }
-            if character == '\n' {
-                input_lines.push(Line::from(std::mem::take(&mut input_spans)));
-                input_column = 0;
-                continue;
-            }
-            let character_text = character.to_string();
-            let character_width = UnicodeWidthStr::width(character_text.as_str());
-            if input_column > 0 && input_column + character_width > input_width {
-                input_lines.push(Line::from(std::mem::take(&mut input_spans)));
-                input_column = 0;
-            }
-            let selected = selection.is_some_and(|(start, end)| index >= start && index < end);
-            input_spans.push(Span::styled(
-                character_text,
-                if selected {
-                    Style::default().bg(theme::BLUE).fg(theme::BASE)
-                } else {
-                    Style::default().fg(theme::TEXT)
-                },
-            ));
-            input_column += character_width;
-        }
-        if self.agent_panel_focused && self.agent_input_cursor == self.agent_input.chars().count() {
-            if input_column >= input_width {
-                input_lines.push(Line::from(std::mem::take(&mut input_spans)));
-            }
-            input_spans.push(Span::styled("▏", Style::default().fg(theme::GREEN)));
-        }
-        input_lines.push(Line::from(input_spans));
-        let total_input_lines = input_lines.len();
-        let visible_input_lines = usize::from(sections[1].height.saturating_sub(2).max(1));
-        let input_start = total_input_lines.saturating_sub(visible_input_lines);
-        frame.render_widget(
-            Paragraph::new(
-                input_lines
-                    .into_iter()
-                    .skip(input_start)
-                    .collect::<Vec<_>>(),
-            )
-            .style(Style::default().bg(theme::BASE).fg(theme::TEXT))
-            .block(
-                Block::bordered()
-                    .title(" Prompt — Enter send · Shift+Enter newline · Tab document ")
-                    .border_style(Style::default().fg(if self.agent_panel_focused {
-                        theme::GREEN
-                    } else {
-                        theme::SURFACE1
-                    })),
-            ),
-            sections[1],
-        );
-        frame.render_widget(
-            Paragraph::new("[Stop] [Retry] [New] [Clear]\n[Diff] [Accept] [Revert]")
-                .style(Style::default().bg(theme::SURFACE0).fg(theme::SUBTEXT0)),
-            sections[2],
-        );
-        let setup = match &self.agent_backend_status {
-            BuiltinAgentStatus::SignIn => {
-                Some("Codex is installed\n\n[ Sign in with ChatGPT ]\n\nClick or press Enter")
-            }
-            BuiltinAgentStatus::Missing => {
-                Some("Codex is not installed\n\n[ Show install command ]\n\nClick for simple setup")
-            }
-            BuiltinAgentStatus::LoginCode { url, code } => {
-                let text =
-                    format!("Finish signing in\n\n{url}\nCode: {code}\n\nClick to copy code");
-                let popup = centered_rect(area, area.width.saturating_sub(4).min(48), 9);
-                frame.render_widget(Clear, popup);
-                frame.render_widget(
-                    Paragraph::new(text)
-                        .alignment(ratatui::layout::Alignment::Center)
-                        .style(Style::default().bg(theme::BASE).fg(theme::TEXT))
-                        .block(
-                            Block::bordered()
-                                .title(" Connect Codex ")
-                                .border_style(Style::default().fg(theme::GREEN)),
-                        ),
-                    popup,
-                );
-                None
-            }
-            BuiltinAgentStatus::Error(error) => {
-                let text = format!("Codex needs attention\n\n{error}\n\nRetry the Agent panel");
-                let popup = centered_rect(area, area.width.saturating_sub(4).min(48), 8);
-                frame.render_widget(Clear, popup);
-                frame.render_widget(
-                    Paragraph::new(text)
-                        .alignment(ratatui::layout::Alignment::Center)
-                        .style(Style::default().bg(theme::BASE).fg(theme::RED))
-                        .block(Block::bordered().title(" Agent error ")),
-                    popup,
-                );
-                None
-            }
-            _ => None,
-        };
-        if let Some(text) = setup {
-            let popup = centered_rect(area, area.width.saturating_sub(4).min(48), 8);
-            frame.render_widget(Clear, popup);
-            frame.render_widget(
-                Paragraph::new(text)
-                    .alignment(ratatui::layout::Alignment::Center)
-                    .style(Style::default().bg(theme::BASE).fg(theme::TEXT))
-                    .block(
-                        Block::bordered()
-                            .title(" Connect an agent ")
-                            .border_style(Style::default().fg(theme::MAUVE)),
-                    ),
-                popup,
-            );
-        }
-        if let Some(approval) = &self.agent_approval {
-            let text = format!(
-                "Codex wants permission to:\n\n{}\n\n[ Allow ]          [ Decline ]\nEnter/Y allows · Esc/N declines",
-                approval.detail
-            );
-            let popup = centered_rect(area, area.width.saturating_sub(4).min(56), 10);
-            frame.render_widget(Clear, popup);
-            frame.render_widget(
-                Paragraph::new(text)
-                    .alignment(ratatui::layout::Alignment::Center)
-                    .wrap(ratatui::widgets::Wrap { trim: true })
-                    .style(Style::default().bg(theme::BASE).fg(theme::TEXT))
-                    .block(
-                        Block::bordered()
-                            .title(" Permission needed ")
-                            .border_style(Style::default().fg(theme::PEACH)),
-                    ),
-                popup,
-            );
-        }
     }
 
     fn render_secondary_pane(&self, frame: &mut Frame) {
@@ -4630,71 +3262,11 @@ fn default_binding(command: Command) -> &'static str {
         Command::PreviousTab => "ctrl+shift+tab",
         Command::ToggleMarkdownReader => "f6",
         Command::ToggleProblems => "f8",
-        Command::ToggleAgentPanel => "ctrl+g / f9",
         Command::OpenKeybindings => "f3",
         Command::ShowHelp => "f1",
         Command::Quit => "ctrl+q",
         _ => "—",
     }
-}
-
-fn wrap_agent_text(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
-    let mut wrapped = Vec::new();
-    for source_line in text.split('\n') {
-        let mut line = String::new();
-        let mut line_width = 0;
-        for grapheme in source_line.graphemes(true) {
-            let grapheme_width = UnicodeWidthStr::width(grapheme);
-            if !line.is_empty() && line_width + grapheme_width > width {
-                wrapped.push(std::mem::take(&mut line));
-                line_width = 0;
-            }
-            line.push_str(grapheme);
-            line_width += grapheme_width;
-        }
-        wrapped.push(line);
-    }
-    if wrapped.is_empty() {
-        wrapped.push(String::new());
-    }
-    wrapped
-}
-
-fn agent_input_char_at(
-    text: &str,
-    width: usize,
-    visible_height: usize,
-    clicked_row: usize,
-    clicked_column: usize,
-) -> usize {
-    let width = width.max(1);
-    let mut rows = vec![vec![(2.min(width), 0)]];
-    let mut column = 2.min(width);
-    for (index, character) in text.chars().enumerate() {
-        if character == '\n' {
-            rows.push(vec![(0, index + 1)]);
-            column = 0;
-            continue;
-        }
-        let character_width = UnicodeWidthStr::width(character.to_string().as_str());
-        if column > 0 && column + character_width > width {
-            rows.push(vec![(0, index)]);
-            column = 0;
-        }
-        column = (column + character_width).min(width);
-        rows.last_mut()
-            .expect("input always has a row")
-            .push((column, index + 1));
-    }
-    let first_visible = rows.len().saturating_sub(visible_height.max(1));
-    let row = rows
-        .get(first_visible + clicked_row)
-        .or_else(|| rows.last())
-        .expect("input always has a row");
-    row.iter()
-        .min_by_key(|(column, _)| column.abs_diff(clicked_column))
-        .map_or(0, |(_, index)| *index)
 }
 
 fn key_event_name(key: &KeyEvent) -> String {
@@ -4732,84 +3304,6 @@ fn key_event_name(key: &KeyEvent) -> String {
     parts.join("+")
 }
 
-fn required_u64(params: &Value, key: &str) -> Result<u64, String> {
-    params
-        .get(key)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| format!("missing or invalid {key}"))
-}
-
-fn agent_position(buffer: &Buffer, value: &Value) -> Result<(usize, usize, usize), String> {
-    let line = required_u64(value, "line")? as usize;
-    let column = required_u64(value, "column")? as usize;
-    if line >= buffer.len_lines() {
-        return Err(format!("line {line} is outside the file"));
-    }
-    let content = buffer.line(line);
-    let content = content.trim_end_matches(['\n', '\r']);
-    let columns = content.chars().count();
-    if column > columns {
-        return Err(format!(
-            "column {column} is outside line {line} (maximum {columns})"
-        ));
-    }
-    Ok((buffer.line_start_char(line) + column, line, column))
-}
-
-fn agent_offset_position(buffer: &Buffer, offset: usize) -> (usize, usize) {
-    for line in (0..buffer.len_lines()).rev() {
-        let start = buffer.line_start_char(line);
-        if offset >= start {
-            return (line, offset - start);
-        }
-    }
-    (0, 0)
-}
-
-fn inserted_end_position(line: usize, column: usize, text: &str) -> (usize, usize) {
-    let added_lines = text.chars().filter(|character| *character == '\n').count();
-    if added_lines == 0 {
-        (line, column + text.chars().count())
-    } else {
-        (
-            line + added_lines,
-            text.rsplit('\n').next().unwrap_or_default().chars().count(),
-        )
-    }
-}
-
-fn collect_workspace_files(root: &Path, limit: usize) -> Vec<PathBuf> {
-    fn visit(root: &Path, directory: &Path, limit: usize, files: &mut Vec<PathBuf>) {
-        if files.len() >= limit {
-            return;
-        }
-        let Ok(entries) = fs::read_dir(directory) else {
-            return;
-        };
-        for entry in entries.flatten() {
-            if files.len() >= limit {
-                break;
-            }
-            let path = entry.path();
-            let name = entry.file_name();
-            if name.to_string_lossy().starts_with('.')
-                || matches!(name.to_str(), Some("target" | "node_modules"))
-            {
-                continue;
-            }
-            if path.is_dir() {
-                visit(root, &path, limit, files);
-            } else if path.is_file() {
-                files.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
-            }
-        }
-    }
-    let mut files = Vec::new();
-    visit(root, root, limit, &mut files);
-    files.sort();
-    files
-}
-
 fn valid_entry_name(name: &str) -> bool {
     let mut components = Path::new(name).components();
     matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
@@ -4833,15 +3327,10 @@ mod input_tests {
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
     use ratatui::{backend::TestBackend, Terminal};
-    use serde_json::json;
 
-    use crate::buffer::Buffer;
     use crate::explorer::Explorer;
 
-    use super::{
-        agent_input_char_at, control_letter, key_event_name, valid_entry_name, AgentMessage,
-        AgentMessageKind, Command, Editor,
-    };
+    use super::{control_letter, key_event_name, valid_entry_name, Command, Editor};
 
     #[test]
     fn maps_raw_control_characters() {
@@ -5285,342 +3774,5 @@ mod input_tests {
         assert_eq!(editor.active, 1);
         editor.execute_command(Command::CloseSplit).unwrap();
         assert!(editor.split.is_none());
-    }
-
-    #[test]
-    fn agent_batch_rejects_stale_input_before_any_edit() {
-        let mut editor = Editor::new(Vec::new());
-        let first = editor.current().id();
-        editor.buffers.push(Buffer::empty());
-        let second = editor.buffers[1].id();
-        let result = editor.apply_agent_batch(&json!({"edits":[
-            {"buffer_id":first,"revision":0,"start":0,"end":0,"text":"x"},
-            {"buffer_id":second,"revision":99,"start":0,"end":0,"text":"y"}
-        ]}));
-        assert_eq!(result, Err("stale buffer revision".into()));
-        assert_eq!(editor.buffers[0].text(), "");
-        assert_eq!(editor.buffers[1].text(), "");
-    }
-
-    #[test]
-    fn agent_edit_method_uses_stable_id_and_revision() {
-        let mut editor = Editor::new(Vec::new());
-        let id = editor.current().id();
-        let result = editor
-            .execute_agent_method(
-                "edit.apply",
-                &json!({"buffer_id":id,"revision":0,"start":0,"end":0,"text":"agent"}),
-            )
-            .unwrap();
-        assert_eq!(result["revision"], 1);
-        assert_eq!(editor.current().text(), "agent");
-    }
-
-    #[test]
-    fn native_agent_edit_inserts_at_cursor_and_returns_range() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("file with spaces.txt");
-        fs::write(&path, "hello").unwrap();
-        let mut editor = Editor::new(vec![root.path().to_path_buf(), path]);
-        let result = editor
-            .execute_agent_method(
-                "editor.edit_text",
-                &json!({"path":"file with spaces.txt","revision":0,"operation":"insert","line":0,"column":5,"text":" world"}),
-            )
-            .unwrap();
-        assert_eq!(editor.current().text(), "hello world");
-        assert_eq!(result["range"]["start"], json!({"line":0,"column":5}));
-        assert_eq!(result["range"]["end"], json!({"line":0,"column":11}));
-    }
-
-    #[test]
-    fn native_agent_edit_replaces_unicode_selection_with_multiline_text() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("unicode.txt");
-        fs::write(&path, "a🦀z\r\nnext\r\n").unwrap();
-        let mut editor = Editor::new(vec![root.path().to_path_buf(), path]);
-        let result = editor
-            .execute_agent_method(
-                "editor.edit_text",
-                &json!({
-                    "path":"unicode.txt","revision":0,"operation":"replace_selection",
-                    "selection":{"start":{"line":0,"column":1},"end":{"line":0,"column":2}},
-                    "text":"β\r\nγ"
-                }),
-            )
-            .unwrap();
-        assert_eq!(editor.current().text(), "aβ\nγz\nnext\n");
-        assert_eq!(result["range"]["end"], json!({"line":1,"column":1}));
-        editor.current_mut().save().unwrap();
-        assert_eq!(
-            fs::read_to_string(root.path().join("unicode.txt")).unwrap(),
-            "aβ\r\nγz\r\nnext\r\n"
-        );
-    }
-
-    #[test]
-    fn native_agent_edit_appends_to_empty_file_and_rejects_stale_state() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("empty.txt");
-        fs::write(&path, "").unwrap();
-        let mut editor = Editor::new(vec![root.path().to_path_buf(), path]);
-        editor
-            .execute_agent_method(
-                "editor.edit_text",
-                &json!({"path":"empty.txt","revision":0,"operation":"append","text":"first\nsecond"}),
-            )
-            .unwrap();
-        assert_eq!(editor.current().text(), "first\nsecond");
-        let error = editor
-            .execute_agent_method(
-                "editor.edit_text",
-                &json!({"path":"empty.txt","revision":0,"operation":"append","text":"lost"}),
-            )
-            .unwrap_err();
-        assert!(error.contains("stale editor state"));
-        assert_eq!(editor.current().text(), "first\nsecond");
-    }
-
-    #[test]
-    fn native_agent_edit_enforces_workspace_boundary() {
-        let parent = tempfile::tempdir().unwrap();
-        let root = parent.path().join("workspace");
-        fs::create_dir(&root).unwrap();
-        fs::write(root.join("inside.txt"), "inside").unwrap();
-        fs::write(parent.path().join("outside.txt"), "outside").unwrap();
-        let mut editor = Editor::new(vec![root.clone(), root.join("inside.txt")]);
-        let error = editor
-            .execute_agent_method(
-                "editor.edit_text",
-                &json!({"path":"../outside.txt","revision":0,"operation":"append","text":"bad"}),
-            )
-            .unwrap_err();
-        assert_eq!(error, "path escapes workspace");
-        assert_eq!(
-            fs::read_to_string(parent.path().join("outside.txt")).unwrap(),
-            "outside"
-        );
-    }
-
-    #[test]
-    fn agent_prompt_queue_and_streamed_response() {
-        let mut editor = Editor::new(Vec::new());
-        editor.enqueue_agent_prompt("please review".into());
-        let prompt = editor
-            .execute_agent_method("agent.next_prompt", &json!({}))
-            .unwrap();
-        assert_eq!(prompt["prompt"], "please review");
-        editor
-            .execute_agent_method("agent.respond", &json!({"text":"Working","append":false}))
-            .unwrap();
-        editor
-            .execute_agent_method("agent.respond", &json!({"text":"…done","append":true}))
-            .unwrap();
-        assert_eq!(editor.agent_messages.last().unwrap().text, "Working…done");
-    }
-
-    #[test]
-    fn agent_prompt_synchronizes_dirty_named_buffers() {
-        let workspace = tempfile::tempdir().unwrap();
-        let path = workspace.path().join("live.rs");
-        fs::write(&path, "old").unwrap();
-        let mut editor = Editor::new(vec![path.clone()]);
-        editor.current_mut().insert_typed("live edit");
-
-        editor.enqueue_agent_prompt("work with this file".into());
-
-        assert_eq!(fs::read_to_string(path).unwrap(), "live editold");
-        assert!(!editor.current().is_dirty());
-        assert_eq!(editor.agent_prompts.back().unwrap(), "work with this file");
-    }
-
-    #[test]
-    fn agent_prompt_requests_a_name_only_for_dirty_untitled_buffer() {
-        let mut editor = Editor::new(Vec::new());
-        editor.current_mut().insert_typed("live edit");
-        editor.agent_input = "help".into();
-
-        let prompt = std::mem::take(&mut editor.agent_input);
-        editor.enqueue_agent_prompt(prompt);
-
-        assert!(editor.path_prompt.is_some());
-        assert_eq!(editor.agent_input, "help");
-        assert!(editor.agent_prompts.is_empty());
-    }
-
-    #[test]
-    fn open_agent_panel_can_yield_focus_to_document() {
-        let mut editor = Editor::new(Vec::new());
-        editor.agent_panel_visible = true;
-        editor.agent_panel_focused = true;
-        editor
-            .agent_panel_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
-            .unwrap();
-        assert!(editor.agent_panel_visible);
-        assert!(!editor.agent_panel_focused);
-
-        editor
-            .key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE))
-            .unwrap();
-        assert_eq!(editor.current().text(), "x");
-    }
-
-    #[test]
-    fn agent_prompt_wraps_and_supports_selection_copy_and_replace() {
-        let mut editor = Editor::new(Vec::new());
-        editor.agent_panel_visible = true;
-        editor.agent_panel_focused = true;
-        editor.insert_agent_input("hello 🌍 and a prompt long enough to wrap");
-        editor
-            .agent_panel_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL))
-            .unwrap();
-        assert_eq!(
-            editor.selected_agent_input().as_deref(),
-            Some("hello 🌍 and a prompt long enough to wrap")
-        );
-        editor.clipboard = Some("replacement".into());
-        editor
-            .agent_panel_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL))
-            .unwrap();
-        assert_eq!(editor.agent_input, "replacement");
-
-        let backend = TestBackend::new(60, 20);
-        let mut terminal = Terminal::new(backend).unwrap();
-        editor.agent_input = "word ".repeat(30);
-        editor.agent_input_cursor = editor.agent_input.chars().count();
-        terminal.draw(|frame| editor.render(frame)).unwrap();
-        assert!(editor.agent_input_area.expect("input area").height > 3);
-    }
-
-    #[test]
-    fn agent_transcript_selection_returns_only_dragged_text() {
-        let mut editor = Editor::new(Vec::new());
-        editor.agent_transcript_text = "first response\nsecond response\n".into();
-        editor.agent_transcript_anchor = Some(6);
-        editor.agent_transcript_cursor = Some(14);
-        assert_eq!(
-            editor.selected_agent_transcript().as_deref(),
-            Some("response")
-        );
-    }
-
-    #[test]
-    fn mouse_position_maps_into_wrapped_agent_prompt() {
-        assert_eq!(agent_input_char_at("abcdef", 5, 3, 1, 2), 5);
-        assert_eq!(agent_input_char_at("ab\ncd", 8, 3, 1, 1), 4);
-    }
-
-    #[test]
-    fn agent_conversation_labels_roles_and_scrolls_independently() {
-        let mut editor = Editor::new(Vec::new());
-        editor.agent_panel_visible = true;
-        editor.agent_panel_focused = true;
-        for index in 0..20 {
-            editor.agent_messages.push(AgentMessage {
-                text: format!("older message {index}"),
-                path: None,
-                kind: AgentMessageKind::Activity,
-            });
-        }
-        editor.agent_messages.push(AgentMessage {
-            text: "my request".into(),
-            path: None,
-            kind: AgentMessageKind::Human,
-        });
-        editor.agent_messages.push(AgentMessage {
-            text: "agent answer".into(),
-            path: None,
-            kind: AgentMessageKind::Agent,
-        });
-        let backend = TestBackend::new(100, 30);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| editor.render(frame)).unwrap();
-        let rendered = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect::<String>();
-        assert!(rendered.contains("YOU"));
-        assert!(rendered.contains("CODEX"));
-
-        let area = editor.agent_area.unwrap();
-        editor
-            .handle_event(Event::Mouse(MouseEvent {
-                kind: MouseEventKind::ScrollUp,
-                column: area.x + 1,
-                row: area.y + 1,
-                modifiers: KeyModifiers::NONE,
-            }))
-            .unwrap();
-        assert_eq!(editor.agent_scroll, 3);
-        editor
-            .agent_panel_key(KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL))
-            .unwrap();
-        assert_eq!(editor.agent_scroll, 0);
-    }
-
-    #[test]
-    fn tracked_agent_edit_can_be_reverted() {
-        let mut editor = Editor::new(Vec::new());
-        let id = editor.current().id();
-        editor
-            .execute_agent_method(
-                "edit.apply",
-                &json!({"buffer_id":id,"revision":0,"start":0,"end":0,"text":"agent"}),
-            )
-            .unwrap();
-        editor.revert_agent_changes();
-        assert_eq!(editor.current().text(), "");
-        assert!(editor.agent_modified.is_empty());
-    }
-
-    #[test]
-    fn agent_revert_never_undoes_a_later_human_edit() {
-        let mut editor = Editor::new(Vec::new());
-        let id = editor.current().id();
-        editor
-            .execute_agent_method(
-                "edit.apply",
-                &json!({"buffer_id":id,"revision":0,"start":0,"end":0,"text":"agent"}),
-            )
-            .unwrap();
-        editor.current_mut().insert_typed(" human");
-        editor.revert_agent_changes();
-        assert_eq!(editor.current().text(), "agent human");
-        assert!(editor.agent_modified.contains_key(&id));
-        assert!(editor.message.contains("skipped"));
-    }
-
-    #[test]
-    fn built_in_agent_disk_changes_can_be_reverted_safely() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("agent.txt");
-        fs::write(&path, "before").unwrap();
-        let mut editor = Editor::new(Vec::new());
-        editor.explorer = Explorer::new(root.path().to_path_buf());
-        editor.agent_disk_before = editor.capture_workspace_files();
-        fs::write(&path, "after").unwrap();
-        editor.finish_agent_disk_changes();
-        assert_eq!(editor.agent_disk_changes.len(), 1);
-        editor.revert_agent_changes();
-        assert_eq!(fs::read_to_string(path).unwrap(), "before");
-    }
-
-    #[test]
-    fn built_in_agent_revert_preserves_later_human_disk_change() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("agent.txt");
-        fs::write(&path, "before").unwrap();
-        let mut editor = Editor::new(Vec::new());
-        editor.explorer = Explorer::new(root.path().to_path_buf());
-        editor.agent_disk_before = editor.capture_workspace_files();
-        fs::write(&path, "agent").unwrap();
-        editor.finish_agent_disk_changes();
-        fs::write(&path, "human").unwrap();
-        editor.revert_agent_changes();
-        assert_eq!(fs::read_to_string(path).unwrap(), "human");
-        assert_eq!(editor.agent_disk_changes.len(), 1);
     }
 }

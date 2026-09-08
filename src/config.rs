@@ -36,7 +36,6 @@ pub struct Config {
     pub editor: EditorConfig,
     pub language_servers: HashMap<String, LanguageServerConfig>,
     pub keybindings: HashMap<String, String>,
-    pub agent: AgentConfig,
     pub explorer: ExplorerConfig,
 }
 
@@ -53,30 +52,6 @@ impl Default for ExplorerConfig {
             show_hidden: false,
             show_build_directories: false,
             max_entries: 5_000,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(default)]
-pub struct AgentConfig {
-    pub enabled: bool,
-    pub allow_read: bool,
-    pub allow_write: bool,
-    pub allow_file_create: bool,
-    pub allow_file_delete: bool,
-    pub allow_commands: bool,
-}
-
-impl Default for AgentConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            allow_read: true,
-            allow_write: false,
-            allow_file_create: false,
-            allow_file_delete: false,
-            allow_commands: false,
         }
     }
 }
@@ -155,14 +130,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_explorer_agent_and_keybinding_settings() {
+    fn parses_explorer_and_keybinding_settings() {
         let config: Config = toml::from_str(
             r#"
             [explorer]
             show_hidden = true
             max_entries = 42
-            [agent]
-            allow_write = true
             [keybindings]
             "alt+p" = "workspace.quick_open"
         "#,
@@ -170,7 +143,6 @@ mod tests {
         .unwrap();
         assert!(config.explorer.show_hidden);
         assert_eq!(config.explorer.max_entries, 42);
-        assert!(config.agent.allow_write);
         assert_eq!(config.keybindings["alt+p"], "workspace.quick_open");
     }
 
@@ -185,11 +157,11 @@ mod tests {
         let mut config = Config::load(workspace.path());
         config
             .keybindings
-            .insert("ctrl+g".into(), "view.toggle_agent".into());
+            .insert("ctrl+g".into(), "view.focus_mode".into());
         config.save_keybindings(workspace.path()).unwrap();
 
         let loaded = Config::load(workspace.path());
-        assert_eq!(loaded.keybindings["ctrl+g"], "view.toggle_agent");
+        assert_eq!(loaded.keybindings["ctrl+g"], "view.focus_mode");
         assert!(workspace.path().join(".tted-keybindings.toml").is_file());
     }
 }

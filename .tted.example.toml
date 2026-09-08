@@ -8,14 +8,6 @@ theme = "base16-eighties.dark"
 [keybindings]
 "ctrl+e" = "workspace.toggle_explorer"
 
-[agent]
-enabled = true
-allow_read = true
-allow_write = false
-allow_file_create = false
-allow_file_delete = false
-allow_commands = false
-
 [explorer]
 show_hidden = false
 show_build_directories = false

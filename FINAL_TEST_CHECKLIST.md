@@ -29,14 +29,6 @@ tmux, Herdr, and SSH.
 
 - [ ] Git branch/state, explorer/gutter marks, status/diffs, and guarded writes work.
 - [ ] A configured LSP starts, reports diagnostics, navigates, completes, and stops.
-- [ ] Agent API is visible, permissions reject forbidden mutations, stale revisions
-      fail, and enabled edits appear in the Agent panel for diff/accept/revert.
-- [ ] F9 detects Codex; missing/install and device-code sign-in cards are clear.
-- [ ] Agent chat streams text/activity, Stop interrupts, Retry/New/Clear work,
-      human/agent roles and scrollback are clear, routine workspace edits work
-      without prompts, destructive permission requests allow or decline by
-      keyboard and mouse, native positional edits reject stale/outside paths,
-      Diff opens, and Accept/Revert are safe.
 - [ ] `.tted.toml` indentation, explorer, theme, wrapping, and custom key settings
       take effect after **Preferences: Reload Configuration**.
 

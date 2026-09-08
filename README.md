@@ -2,7 +2,8 @@
 
 TTED (Terminal Text Editor) is an early-stage, conventional terminal text editor.
 It is designed to work naturally in ordinary terminals, SSH sessions, tmux, and
-Herdr without requiring an AI agent.
+Herdr. External tools can edit files alongside TTED; the editor handles disk
+changes without running an integrated chat service.
 
 ## Current v0.1
 
@@ -29,8 +30,7 @@ Herdr without requiring an AI agent.
 
 - configured language-server diagnostics, navigation, completion, and edits
 - two-pane split editing
-- a permission-scoped structured agent API and optional integrated Agent panel
-- optional TOML configuration for editing, keybindings, explorer, LSP, and agents
+- optional TOML configuration for editing, keybindings, explorer, and LSP
 
 ## Install on Linux
 
@@ -149,8 +149,7 @@ rm "$HOME/.local/bin/tted"
 ```
 
 TTED itself has no runtime service or AI dependency. Git features require
-`git`; LSP features require the language servers you choose; integrated Codex
-chat requires the optional Codex CLI.
+`git`; LSP features require the language servers you choose.
 
 ## Build and run from a checkout
 
@@ -186,7 +185,6 @@ Passing a directory selects that workspace and opens its explorer.
 | Ctrl+Shift+Tab / Ctrl+PageUp | Previous tab |
 | Alt+Left / Alt+Right | Previous / next tab (portable fallback) |
 | Ctrl+Shift+M / F6 | Toggle Markdown source / reading view |
-| Ctrl+G / F9 | Open or close the built-in Agent chat |
 | F11 | Toggle document-only Focus Mode |
 | Ctrl+Q | Quit; press twice when changes are unsaved |
 | F1 | Show keybindings help |
@@ -249,20 +247,6 @@ The Command Palette can split the editor right or down, focus the adjacent
 split, and close the split. Panes reference the same underlying open buffers;
 clicking an inactive pane focuses it.
 
-An optional structured agent API listens on `/tmp/tted-<pid>.sock` by default.
-It uses stable buffer IDs and revision-checked JSON-RPC edits rather than
-terminal scraping or simulated keys. Mutation permissions default off; see
-`AGENT_API.md` and `.tted.example.toml`.
-
-F9 opens a collapsible, conventional Agent chat. TTED automatically detects an
-installed Codex CLI, reuses its sign-in, or presents a clickable device-code
-setup. Type a request and press Enter; Shift+Enter inserts a newline. Responses,
-commands, edits, completion, and errors stream into the panel. Stop, Retry, New,
-Clear, Diff, Accept, and Revert are clickable. The role-labeled conversation has
-independent mouse/Page scrolling. Codex is confined to workspace writes without
-routine prompts, and Revert refuses to overwrite later human changes. The existing
-provider-neutral socket API remains available for advanced/custom backends.
-
 When an open file changes on disk, TTED reloads it automatically if the editor
 buffer is clean. If unsaved edits could be lost, use `R` to reload the disk
 version or `K` to keep the editor version. Deleted files can be kept and recreated
@@ -278,6 +262,5 @@ cargo build --release
 ```
 
 Documentation: [keybindings](KEYBINDINGS.md), [configuration](CONFIGURATION.md),
-[architecture](ARCHITECTURE.md), [Agent chat](AGENT_CHAT.md),
-[agent API](AGENT_API.md),
+[architecture](ARCHITECTURE.md),
 [contributing](CONTRIBUTING.md), and [changelog](CHANGELOG.md).
