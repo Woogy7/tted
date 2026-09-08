@@ -1260,4 +1260,6 @@ A small number of features that feel exceptionally good is more valuable than ra
 - [x] Harden save permissions, symlinks, conflicts, and replacement ranges.
 - [x] Preserve undo and cursor context across external reloads.
 - [x] Improve large-file rendering and search responsiveness.
-- [ ] Verify core keyboard, mouse, Git, and language-server workflows.
+- [x] Verify core keyboard/mouse behavior in regression tests, Git in temporary
+  repositories, and terminal/LSP workflows in real pseudo-terminals.
+- [ ] Repeat the release checklist on SSH/tmux and supported release platforms.

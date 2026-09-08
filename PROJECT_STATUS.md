@@ -1,8 +1,8 @@
 # TTED project status
 
-TTED v0.1 now implements every phase in the current development roadmap. It is
-a standalone conventional terminal editor and remains fully useful without an
-agent connection.
+TTED is a standalone conventional terminal editor. Current development focuses
+on safe editing, responsive navigation, and working alongside external tools.
+Historical agent phases in the roadmap are retired.
 
 ## Product surface
 
@@ -16,13 +16,13 @@ agent connection.
 - Configured LSP lifecycle, diagnostics, Problems panel, hover, definition,
   completion, references, rename, code actions, formatting, symbols, and
   signature help.
-- Optional workspace TOML for editor, explorer, custom command keys, language
+- Optional workspace TOML for editor, explorer, custom command keys, and language
   servers. Defaults require no configuration.
 
 ## Architecture and operations
 
-Editor state mutates only on the UI loop. Git and LSP use
-bounded service/event boundaries; managed children are cancelled and reaped.
+Editor state mutates only on the UI loop. Git and LSP communicate through
+service events; managed language-server children are cancelled and reaped.
 Lightweight diagnostic logs default to `/tmp/tted-<pid>.log`.
 
 `tted .`, `tted README.md`, and multiple file arguments are supported. CI
@@ -40,7 +40,9 @@ and configures a normal user's PATH.
 - Search results are cached by revision; case-insensitive matching handles Unicode
   lowercase expansions.
 - Explorer filtering is configurable but not yet gitignore-aware.
-- Language servers are optional external processes.
+- Language servers are optional external processes, with one active language
+  service at a time. Completion and code actions still expose a basic protocol
+  subset; they are candidates for further usability work.
 - External tools edit files directly; there is no built-in chat or agent API.
 
 See `ROADMAP.md` for phase history and `FINAL_TEST_CHECKLIST.md` for the
@@ -52,3 +54,12 @@ Integrated agent features have been removed. Saves preserve file permissions and
 symlink targets, confirm Save As overwrites, and check for disk conflicts before
 replacement. External reloads preserve earlier undo history and cursor/selection
 context; even discarded unsaved edits can be recovered with Undo.
+
+## Validation — 2026-09-08
+
+96 automated tests, formatting, Clippy with warnings denied, and the release
+build pass. Real pseudo-terminal checks cover paste/save, permissions, external
+reload and undo, dirty conflicts, resize, and terminal restoration. A controlled
+language-server process verifies document open/close, stale-format rejection,
+and child cleanup. Git refresh tests use temporary repositories. Cross-platform
+release installation and interactive SSH/tmux testing remain release checks.

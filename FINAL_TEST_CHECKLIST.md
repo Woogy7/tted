@@ -39,3 +39,10 @@ tmux, Herdr, and SSH.
 - [ ] `cargo clippy --all-targets -- -D warnings`
 - [ ] `cargo build --release`
 - [ ] Tagged GitHub release artifacts install successfully on each target platform.
+
+## Development validation — 2026-09-08
+
+The automated suite and a real pseudo-terminal pass cover the new save, reload,
+undo, conflict, resize, and terminal cleanup behavior. A controlled LSP process
+checks framing, document lifecycle, stale formatting rejection, and shutdown.
+The full hands-on and cross-platform release checklist above remains applicable.
