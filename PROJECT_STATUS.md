@@ -57,7 +57,7 @@ context; even discarded unsaved edits can be recovered with Undo.
 
 ## Validation — 2026-09-08
 
-103 automated tests, formatting, Clippy with warnings denied, and the release
+113 automated tests, formatting, Clippy with warnings denied, and the release
 build pass. Real pseudo-terminal checks cover paste/save, permissions, external
 reload and undo, dirty conflicts, resize, and terminal restoration. A controlled
 language-server process verifies document open/close, stale-format rejection,
@@ -70,3 +70,9 @@ by revision. Shift+Home/End uses the same selection behavior as source mode.
 Diagnostics now aggregate frame-render and input-processing timings without
 recording document contents. Unchanged Git snapshots no longer redraw the UI,
 and quick Git commands use a shorter polling interval.
+
+Markdown editing now continues lists/tasks/quotes, supports whole-line list
+indentation and backtick completion, and shares its parsed styles across source
+and preview. Both `te` and `tted` launch the same editor. Terminal and offline
+installer checks cover both launchers and older release archives. Physical
+laptop shortcut forwarding can be inspected through Help: Inspect Next Key.

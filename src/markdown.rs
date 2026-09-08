@@ -27,10 +27,28 @@ pub struct RenderedMarkdown {
     runs: Vec<Vec<SourceRun>>,
     pub(crate) code_rows: Vec<bool>,
     pub(crate) fenced_rows: Vec<bool>,
+    pub(crate) fence_starts: Vec<bool>,
     line_starts: Vec<usize>,
 }
 
 impl RenderedMarkdown {
+    pub(crate) fn source_line_styles(&self, row: usize, length: usize) -> Vec<Style> {
+        let mut styles = vec![Style::default().fg(theme::SUBTEXT0); length];
+        let Some(line) = self.lines.get(row) else {
+            return styles;
+        };
+        let start = self.line_starts[row];
+        // Fill whole runs once instead of searching every span for every character.
+        for (span, run) in line.spans.iter().zip(&self.runs[row]).rev() {
+            let from = run.source_start.saturating_sub(start).min(length);
+            let to = run.source_end.saturating_sub(start).min(length);
+            if from < to {
+                styles[from..to].fill(span.style);
+            }
+        }
+        styles
+    }
+
     pub fn source_style(&self, row: usize, position: usize) -> Style {
         self.lines
             .get(row)
@@ -105,6 +123,7 @@ pub fn render_document(source: &str) -> RenderedMarkdown {
         runs: vec![Vec::new(); byte_starts.len()],
         code_rows: vec![false; byte_starts.len()],
         fenced_rows: vec![false; byte_starts.len()],
+        fence_starts: vec![false; byte_starts.len()],
         line_starts: char_starts.clone(),
     };
     char_bytes.push(source.len());
@@ -156,6 +175,7 @@ pub fn render_document(source: &str) -> RenderedMarkdown {
                         document.code_rows[row..=last].fill(true);
                         if matches!(kind, pulldown_cmark::CodeBlockKind::Fenced(_)) {
                             document.fenced_rows[row..=last].fill(true);
+                            document.fence_starts[row] = true;
                         }
                         style = Style::default().fg(theme::GREEN).bg(theme::SURFACE0)
                     }
@@ -418,5 +438,24 @@ mod active_line_tests {
             .source_style(1, 10)
             .add_modifier
             .contains(Modifier::BOLD));
+    }
+}
+
+#[cfg(test)]
+mod source_style_tests {
+    use super::*;
+    #[test]
+    fn bulk_source_styles_match_preview_for_unicode_nested_markup_and_code() {
+        let source = "# 🌍 **bold** and *italic*\n> - [x] a &amp; b\n\n```rust\nlet x = 1;\n```\n";
+        let document = render_document(source);
+        let mut start = 0;
+        for (row, text) in source.split_inclusive('\n').enumerate() {
+            let length = text.chars().count();
+            let styles = document.source_line_styles(row, length);
+            for (offset, style) in styles.into_iter().enumerate() {
+                assert_eq!(style, document.source_style(row, start + offset));
+            }
+            start += length;
+        }
     }
 }

@@ -39,7 +39,14 @@ impl SyntaxCache {
             .rsplit_once('.')
             .and_then(|(_, extension)| syntaxes.find_syntax_by_extension(extension))
             .or_else(|| syntaxes.find_syntax_by_extension(&name))
-            .or_else(|| syntaxes.find_syntax_by_first_line(&buffer.line(0)));
+            .or_else(|| {
+                let first = buffer.line(0);
+                if first.trim().is_empty() {
+                    None
+                } else {
+                    syntaxes.find_syntax_by_first_line(&first)
+                }
+            });
         let Some(syntax) = syntax else {
             self.pending = false;
             return vec![Vec::new(); end - start];

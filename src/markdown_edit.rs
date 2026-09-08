@@ -172,3 +172,129 @@ mod tests {
         assert!(!newline(&mut buffer, false));
     }
 }
+
+pub(crate) fn backtick(buffer: &mut Buffer, in_code: bool) {
+    if let Some(selected) = buffer.selected_text() {
+        let longest = selected
+            .split(|c| c != '`')
+            .map(str::len)
+            .max()
+            .unwrap_or(0);
+        let delimiter = "`".repeat(longest + 1);
+        let padding = if selected.starts_with('`') || selected.ends_with('`') {
+            " "
+        } else {
+            ""
+        };
+        buffer.insert(&format!(
+            "{delimiter}{padding}{selected}{padding}{delimiter}"
+        ));
+        return;
+    }
+    let before = buffer.current_line_prefix();
+    // A third consecutive backtick expands the empty inline pair into a fence pair.
+    if before.trim_start_matches([' ', '\t']) == "``"
+        && matches!(buffer.char_at_cursor(), None | Some('\n'))
+    {
+        buffer.insert("````");
+        buffer.move_horizontal(-3, false);
+    } else if buffer.char_at_cursor() == Some('`') {
+        buffer.move_horizontal(1, false);
+    } else if in_code || before.ends_with('\\') {
+        buffer.insert_typed("`");
+    } else {
+        buffer.insert("``");
+        buffer.move_horizontal(-1, false);
+    }
+}
+
+/// Split a paired fence or complete a new opening fence on Enter.
+pub(crate) fn fence_newline(buffer: &mut Buffer, opening_fence: bool) -> bool {
+    if buffer.selection().is_some() {
+        return false;
+    }
+    let before = buffer.current_line_prefix();
+    let opening = before.trim_start_matches(' ');
+    let indent_len = before.len() - opening.len();
+    if indent_len > 3 || !opening.starts_with("```") {
+        return false;
+    }
+    let count = opening.bytes().take_while(|c| *c == b'`').count();
+    if opening[count..].contains('`') {
+        return false;
+    }
+    let (row, _) = buffer.cursor_line_col();
+    let line = buffer.line(row);
+    let tail = line[before.len()..].trim_end_matches(['\r', '\n']);
+    let fence = "`".repeat(count);
+    let indent = &before[..indent_len];
+    if tail == fence {
+        buffer.insert(&format!("\n{indent}\n{indent}"));
+        buffer.move_horizontal(-((indent_len + 1) as isize), false);
+        return true;
+    }
+    if !opening_fence || !tail.is_empty() {
+        return false;
+    }
+    // Reuse an existing closing fence instead of inserting a duplicate.
+    for next in row + 1..buffer.len_lines() {
+        let line = buffer.line(next);
+        let trimmed = line.trim_start_matches(' ');
+        if line.len() - trimmed.len() <= 3
+            && trimmed.starts_with(&fence)
+            && trimmed
+                .trim_end_matches(['\r', '\n', ' ', '\t'])
+                .bytes()
+                .all(|c| c == b'`')
+        {
+            return false;
+        }
+    }
+    buffer.insert(&format!("\n{indent}\n{indent}{fence}"));
+    buffer.move_horizontal(-((indent_len + count + 1) as isize), false);
+    true
+}
+
+#[cfg(test)]
+mod completion_tests {
+    use super::*;
+    #[test]
+    fn inline_backticks_pair_skip_and_wrap_unicode() {
+        let mut buffer = Buffer::empty();
+        backtick(&mut buffer, false);
+        assert_eq!((buffer.text(), buffer.cursor()), ("``".into(), 1));
+        buffer.insert_typed("🌍");
+        backtick(&mut buffer, false);
+        assert_eq!((buffer.text(), buffer.cursor()), ("`🌍`".into(), 3));
+        buffer.select_all();
+        backtick(&mut buffer, false);
+        assert_eq!(buffer.text(), "`` `🌍` ``");
+        buffer.undo();
+        assert_eq!(buffer.text(), "`🌍`");
+    }
+    #[test]
+    fn triple_backticks_complete_fence_with_language_and_undo() {
+        let mut buffer = Buffer::empty();
+        for _ in 0..3 {
+            backtick(&mut buffer, false);
+        }
+        assert_eq!((buffer.text(), buffer.cursor()), ("``````".into(), 3));
+        buffer.insert_typed("rust");
+        assert!(fence_newline(&mut buffer, false));
+        assert_eq!(buffer.text(), "```rust\n\n```");
+        assert_eq!(buffer.cursor_line_col(), (1, 0));
+        buffer.undo();
+        assert_eq!(buffer.text(), "```rust```");
+    }
+    #[test]
+    fn pasted_fence_completes_but_existing_closer_is_preserved() {
+        let mut buffer = Buffer::empty();
+        buffer.insert("```rust");
+        assert!(fence_newline(&mut buffer, true));
+        assert_eq!(buffer.text(), "```rust\n\n```");
+        buffer.set_cursor_line_col(0, 7, false);
+        assert!(!fence_newline(&mut buffer, true));
+        buffer.set_cursor_line_col(2, 3, false);
+        assert!(!fence_newline(&mut buffer, false));
+    }
+}

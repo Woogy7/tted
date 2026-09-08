@@ -41,7 +41,8 @@ openSUSE, and most other Linux distributions:
 curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/Woogy7/tted/main/install.sh | sh
 ```
 
-Open a new terminal, then launch TTED in the current directory:
+Open a new terminal, then launch TTED in the current directory with either
+`te .` or `tted .`:
 
 ```sh
 tted .
@@ -57,8 +58,8 @@ tted src/main.rs src/editor.rs
 The installer downloads a SHA-256-verified binary from the latest GitHub
 release. Before the first tagged release—or when no binary exists for the
 machine—it builds TTED from source with Cargo. It installs to
-`~/.local/bin/tted` for a normal user and adds that directory to PATH for new
-shells. When run as root, it installs to `/usr/local/bin/tted`.
+`~/.local/bin/tted` and `~/.local/bin/te` for a normal user and adds that directory
+to PATH for new shells. When run as root, both commands go in `/usr/local/bin`.
 
 ### Ubuntu and Debian
 
@@ -218,7 +219,22 @@ F6 toggles Markdown live preview. The active line shows its Markdown syntax
 while retaining live text styling; surrounding lines stay formatted. Type, select, paste, search, and undo as in
 source mode. Click formatted text to place the cursor in its source line.
 Selected lines reveal their syntax so the exact selection stays visible.
-Shift+Home and Shift+End select to the start or end of the active line.
+Shift+Home and Shift+End select to the start or end of the active line;
+Alt+Shift+Left/Right provide alternatives. F3 lets you remap these actions.
+For terminal shortcut troubleshooting, use F2 → **Help: Inspect Next Key**.
+
+Markdown editing includes:
+
+- Enter continues bullets, numbered lists, tasks (unchecked), and quotes.
+- Enter on an empty item removes its marker to finish the list or quote.
+- Shift+Enter adds a continuation line without a new list marker.
+- Tab/Shift+Tab indent/unindent a list item or selected lines in one undo step.
+- A single backtick creates an inline-code pair or wraps selected text.
+- Three backticks create a fence pair; type an optional language and press Enter
+  to open the block. Typing an existing closing backtick moves past it.
+
+List automation is disabled inside fenced code. Both Markdown views share a
+cached parser for consistent styling and responsive navigation.
 
 In Markdown live preview, click a rendered `[ ]` or `[x]` task checkbox to
 toggle the corresponding source item. Checkbox changes are normal undoable,

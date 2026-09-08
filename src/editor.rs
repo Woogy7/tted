@@ -823,6 +823,12 @@ impl Editor {
             return Ok(false);
         }
         match key.code {
+            KeyCode::Char('`') if self.is_markdown() => {
+                let in_code =
+                    self.markdown_document().code_rows[self.current().cursor_line_col().0];
+                crate::markdown_edit::backtick(self.current_mut(), in_code);
+                self.changed();
+            }
             KeyCode::Char(c) => {
                 if matches!(c, '}' | ']' | ')')
                     && self
@@ -838,6 +844,15 @@ impl Editor {
                 self.changed();
             }
             KeyCode::Enter => {
+                if self.is_markdown() {
+                    let opening =
+                        self.markdown_document().fence_starts[self.current().cursor_line_col().0];
+                    if crate::markdown_edit::fence_newline(self.current_mut(), opening) {
+                        self.changed();
+                        self.ensure_visible();
+                        return Ok(false);
+                    }
+                }
                 if self.is_markdown()
                     && !self.markdown_document().code_rows[self.current().cursor_line_col().0]
                     && crate::markdown_edit::newline(self.current_mut(), shift)
@@ -1259,6 +1274,7 @@ impl Editor {
             }
             Command::FocusMode => self.toggle_focus_mode(),
             Command::InspectKey => {
+                self.focus_mode = false;
                 self.inspect_next_key = true;
                 self.message =
                     "Press the shortcut to inspect (Esc cancels); document will not change".into();
@@ -2566,7 +2582,11 @@ impl Editor {
             let status = self.modal_prompt_text().unwrap_or_else(|| {
                 format!(
                     "{}   Markdown live preview   F6 source   Ctrl+S save",
-                    self.current().name()
+                    if self.message.is_empty() {
+                        self.current().name()
+                    } else {
+                        self.message.clone()
+                    }
                 )
             });
             if !self.focus_mode {
@@ -3497,13 +3517,32 @@ impl Editor {
     }
 
     fn highlight_visible_lines(&mut self, start: usize, end: usize) -> Vec<Vec<Style>> {
-        self.syntax_cache.highlight(
+        if self.is_markdown() {
+            self.syntax_cache.pending = false;
+            let document = self.markdown_document();
+            return (start..end)
+                .map(|row| {
+                    let length = self.current().rope().line(row).len_chars().min(16_384);
+                    document.source_line_styles(row, length)
+                })
+                .collect();
+        }
+        let started = Instant::now();
+        let result = self.syntax_cache.highlight(
             &self.buffers[self.active],
             &self.syntaxes,
             &self.theme,
             start,
             end,
-        )
+        );
+        if started.elapsed() >= Duration::from_millis(16) {
+            crate::diagnostics::log(&format!(
+                "slow syntax highlighting elapsed_us={} visible_lines={}",
+                started.elapsed().as_micros(),
+                end.saturating_sub(start)
+            ));
+        }
+        result
     }
 }
 
@@ -3534,6 +3573,8 @@ fn default_binding(command: Command) -> &'static str {
         Command::QuickOpen => "ctrl+p",
         Command::ToggleExplorer => "ctrl+e",
         Command::FindReplace => "ctrl+f",
+        Command::SelectLineStart => "alt+shift+left",
+        Command::SelectLineEnd => "alt+shift+right",
         Command::NextTab => "ctrl+tab",
         Command::PreviousTab => "ctrl+shift+tab",
         Command::ToggleMarkdownReader => "f6",
@@ -4239,6 +4280,18 @@ mod markdown_list_input_tests {
             .key(KeyEvent::new(KeyCode::Home, KeyModifiers::SHIFT))
             .unwrap();
         assert!(editor.message.contains("shift+home"));
+        editor.markdown_reading[0] = true;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 12)).unwrap();
+        terminal.draw(|frame| editor.render(frame)).unwrap();
+        let screen = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("Received shift+home"));
         assert_eq!(editor.current().text(), "hello 🌍");
         editor.execute_command(Command::InspectKey).unwrap();
         editor.key(KeyEvent::from(KeyCode::Char('Q'))).unwrap();

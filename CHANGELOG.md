@@ -4,6 +4,14 @@ All notable changes are documented here.
 
 ## Unreleased
 
+- Add inline and fenced backtick completion, including selected-text wrapping,
+  language-labelled fences, and typing past closing delimiters.
+- Ship a `te` launcher alongside `tted` in Cargo installs and release archives;
+  the installer also provides `te` for older archives.
+- Reuse cached Markdown styles in source view to avoid cold regex-highlighting
+  stalls. Skip first-line syntax detection for empty buffers and log slow syntax
+  passes without recording document contents.
+
 - Continue Markdown bullets, numbered lists, tasks, and quotes on Enter; exit
   empty items, add continuation lines with Shift+Enter, and indent selected list
   lines with Tab/Shift+Tab as one undoable edit.

@@ -52,3 +52,7 @@ choose **Help: Inspect Next Key**, then press it. TTED displays and logs the
 received special key and modifiers without editing the document. Printable
 characters are redacted. If no event arrives, inspect terminal/multiplexer
 bindings; TTED cannot restore modifiers that were removed before delivery.
+
+In Markdown, type a backtick to pair inline code or wrap selected text. Type
+three backticks for a fence pair, optionally add a language, then press Enter.
+Typing a closing backtick already under the cursor moves past it.
